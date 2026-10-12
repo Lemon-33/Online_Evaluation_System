@@ -1,6 +1,6 @@
 // 用户数据层：注册 / 登录
 //
-// 真实模式：调用 CloudBase 云函数 userService（云函数里用 pg 连 PostgreSQL）
+// 真实模式：调用 CloudBase 云函数 userService（云函数里通过 HTTP API 读写 PostgreSQL）
 // 降级模式：未配置环境或 VITE_USE_MOCK=true 时，用 localStorage 模拟，
 //          结构与真实一致（同样是 snake_case），保证两种模式行为统一。
 

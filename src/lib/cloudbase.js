@@ -32,11 +32,20 @@ export async function initCloudBase() {
   }
   if (!app) {
     app = cloudbase.init({ env: ENV_ID });
-    // 匿名登录，方便免登录场景的写入
+    // 匿名登录：调用云函数要走 CloudBase 平台鉴权，必须持有登录态。
+    // 本系统的账号体系在自建的 user_table 里（不用云开发身份），所以只需要
+    // 一个匿名登录态来通过平台鉴权。
+    // ⚠️ 本项目用的是 @cloudbase/js-sdk 1.x，匿名登录只有这一种写法；
+    //    v2 的 auth().signInAnonymously() 在 1.x 中不存在，调用会抛 TypeError
+    //    并被 catch 吞掉，表现为「后续 callFunction 报鉴权失败」。
     try {
-      await app.auth().signInAnonymously();
+      const auth = app.auth({ persistence: 'local' });
+      if (!auth.hasLoginState()) {
+        await auth.anonymousAuthProvider().signIn();
+      }
     } catch (e) {
-      console.warn('[CloudBase] 匿名登录失败，请检查安全规则：', e);
+      console.error('[CloudBase] 匿名登录失败：', e);
+      console.error('[CloudBase] 请到控制台 → 身份认证/登录授权 → 开启「匿名登录」后刷新页面');
     }
     _db = app.database();
   }

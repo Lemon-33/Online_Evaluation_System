@@ -1,9 +1,7 @@
 {
   "name": "userService",
-  "version": "1.0.0",
-  "description": "用户注册 / 登录云函数（PostgreSQL）",
+  "version": "2.0.0",
+  "description": "用户注册 / 登录云函数（通过 CloudBase PostgreSQL HTTP API 访问数据库，零依赖）",
   "main": "index.js",
-  "dependencies": {
-    "pg": "^8.11.5"
-  }
+  "dependencies": {}
 }
