@@ -95,7 +95,7 @@ export default function Register() {
             name="username"
             rules={[
               { required: true, message: '请输入账号' },
-              { min: 3, max: 20, message: '账号长度 3-20 位' },
+              { min: 6, max: 20, message: '账号长度 6-20 位' },
               { pattern: /^[a-zA-Z0-9_]+$/, message: '仅允许字母、数字、下划线' },
             ]}
           >

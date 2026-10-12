@@ -1,5 +1,5 @@
 /**
- * userService —— 用户注册 / 登录云函数
+ * userService —— 用户注册 / 登录云函数（事件函数，非 HTTP 函数）
  *
  * 访问数据库的方式：CloudBase PostgreSQL 的 HTTP API（基于 PostgREST）
  *   https://<环境ID>.api.tcloudbasegateway.com/v1/rdb/rest/<表名>
@@ -13,261 +13,222 @@
  *
  * 需要配置的环境变量（控制台 → 云函数 → 函数配置 → 环境变量）：
  *   TCB_API_KEY   必填。控制台「ApiKey 管理」里的 API Key。
- *                 注意必须用 API Key（服务端用，映射 service_role，可绕过 RLS），
+ *                 必须用 API Key（服务端用，映射 service_role，可绕过 RLS），
  *                 不要用 Publishable Key（那是给浏览器用的低权限凭证）
- *   TCB_ENV       可选。环境 ID，默认已填当前环境
+ *   TCB_ENV       必填（换新环境时）。环境 ID
  *   TCB_TABLE     可选。表名，默认 user_table
  *
  * 入参：{ action: 'ping' | 'gateway' | 'register' | 'login', payload: {...} }
  *   ping     自检：检查环境变量是否齐全（不联网）
- *   gateway  自检：请求一次数据库 HTTP API，返回状态码与响应体
- *   register 注册：写入 user_table
+ *   gateway  自检：请求一次数据库 HTTP API，返回状态码、行数、耗时
+ *   register 注册：写入 user_table（user_id 唯一）
  *   login    登录：校验 user_id + pw
  * 出参：{ code: 'OK' | 'USER_EXISTS' | 'BAD_CREDENTIALS' | ..., message?, user? }
+ *
+ * 重要：返回的 user 对象绝不包含 pw 字段
  */
 
 // ---------- 配置 ----------
-const ENV_ID = process.env.TCB_ENV || 'lhr20000711-d0gfnvzhdf1b2802d';
-const API_KEY = process.env.TCB_API_KEY || process.env.TCB_PUBLISHABLE_KEY || '';
+const ENV_ID = process.env.TCB_ENV || 'lhr20000711-d0gfnvzhdf1b2802d'; // 换新环境时必须改
+const API_KEY = process.env.TCB_API_KEY || '';
 const TABLE = process.env.TCB_TABLE || 'user_table';
-const BASE_URL = `https://${ENV_ID}.api.tcloudbasegateway.com/v1/rdb/rest/${TABLE}`;
-
-// 对外返回的字段：刻意排除 pw，避免密码泄漏到前端
-const FIELDS_FULL = 'id,user_id,admin,name,type,job,branch,created_at';
-const FIELDS_MIN = 'id,user_id,admin,name,type,job,branch';
-let useFullFields = true; // 表里若没有 created_at，自动降级为 FIELDS_MIN
-
-// 平台函数超时上限较严（默认 3 秒），请求超时必须更小，
-// 否则函数会被平台直接杀掉，看不到真实错误原因
+const BASE = `https://${ENV_ID}.api.tcloudbasegateway.com/v1/rdb/rest`;
 const REQUEST_TIMEOUT_MS = 2500;
 
-function fields() {
-  return useFullFields ? FIELDS_FULL : FIELDS_MIN;
-}
+// 查询/返回时用的字段（不含 pw）
+const FIELDS = ['user_id', 'name', 'admin', 'type', 'job', 'branch', 'created_at'];
+const fields = () => FIELDS.join(',');
 
-// ---------- HTTP API 请求封装 ----------
-async function rest(query = '', { method = 'GET', body, prefer } = {}) {
+// ---------- PostgREST 请求封装 ----------
+async function rest(path, { method = 'GET', body, prefer } = {}) {
   if (!API_KEY) {
-    const err = new Error('缺少环境变量 TCB_API_KEY');
-    err.code = 'MISSING_KEY';
-    throw err;
+    throw Object.assign(new Error('缺少 TCB_API_KEY'), { code: 'MISSING_KEY' });
   }
-
-  const headers = {
-    Authorization: `Bearer ${API_KEY}`,
-    Accept: 'application/json',
-  };
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (prefer) headers.Prefer = prefer;
-
+  const url = `${BASE}/${TABLE}${path}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
   try {
-    const res = await fetch(BASE_URL + query, {
+    const res = await fetch(url, {
       method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...(prefer ? { Prefer: prefer } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
     const text = await res.text();
     let data = null;
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = text;
-      }
-    }
-    return { ok: res.ok, status: res.status, data };
+    try { data = text ? JSON.parse(text) : null; } catch { /* 非 JSON，保留原文 */ }
+    return { status: res.status, ok: res.ok, data, text };
   } finally {
     clearTimeout(timer);
   }
 }
 
-// 从 PostgREST 的错误响应里取出上游 PostgreSQL 的错误码
-function pgErrorCode(res) {
-  if (res && res.data && typeof res.data === 'object' && res.data.code) return res.data.code;
-  return null;
+// 上游错误信息摘要（排查用，截断防刷屏）
+function upstream(res) {
+  return { httpStatus: res.status, body: (res.text || '').slice(0, 300) };
 }
 
-function pgErrorMessage(res) {
-  if (res && res.data && typeof res.data === 'object') {
-    return res.data.message || res.data.details || res.data.hint || `HTTP ${res.status}`;
-  }
-  return `HTTP ${res ? res.status : 'unknown'}`;
-}
+// PostgREST 错误码判断
+const isTableMissing = (r) => r.status === 404 || (r.data && r.data.code === 'PGRST205');
+const isNoPermission = (r) => r.status === 401 || r.status === 403;
+const isDup = (r) => r.status === 409 || (r.data && (r.data.code === '23505' || String(r.data.message || '').includes('duplicate key')));
+const isColumnMissing = (r) => r.data && (r.data.code === 'PGRST204' || r.data.code === '42703');
 
-// 无论后端返回什么，都保证 pw 不外泄
-function sanitize(row) {
-  if (!row || typeof row !== 'object') return row;
-  const copy = { ...row };
-  delete copy.pw;
-  return copy;
-}
-
-// ---------- 注册 ----------
-async function register(payload = {}) {
-  const { user_id, pw, name, branch } = payload;
-  const isAdmin = payload.admin === true || payload.admin === 'true';
-  const type = isAdmin ? null : payload.type || null;
-  const job = isAdmin ? null : payload.job || null;
-
-  if (!user_id || !pw || !name || !branch) {
-    return { code: 'BAD_PARAMS', message: '缺少必填字段' };
-  }
-  if (!isAdmin && (!type || !job)) {
-    return { code: 'BAD_PARAMS', message: '员工必须填写岗位类型和岗位' };
-  }
-
-  // id 不传值，由数据库 DEFAULT 生成，用户永远无法干预
-  const body = { user_id, pw, admin: isAdmin, name, type, job, branch };
-
-  const doInsert = () =>
-    rest(`?select=${fields()}`, { method: 'POST', body, prefer: 'return=representation' });
-
-  let res = await doInsert();
-
-  // 42703 = undefined_column：表里可能没有 created_at，降级重试一次
-  if (!res.ok && pgErrorCode(res) === '42703' && useFullFields) {
-    useFullFields = false;
-    res = await doInsert();
-  }
-
-  if (res.ok) {
-    const rows = Array.isArray(res.data) ? res.data : [];
-    if (rows.length === 0) {
-      // 表存在但没回传数据，多半是缺 INSERT 权限或 RLS 策略挡住了
-      return {
-        code: 'NO_RETURNED_ROW',
-        message: '写入未返回数据，请检查该表的权限/RLS 策略是否允许插入',
-      };
-    }
-    return { code: 'OK', user: sanitize(rows[0]) };
-  }
-
-  const errCode = pgErrorCode(res);
-
-  // 23505 = unique_violation：user_id 已被占用。
-  // 靠数据库唯一索引拦截，比"先查询再插入"更可靠（并发下不会漏）
-  if (errCode === '23505') {
-    return { code: 'USER_EXISTS', message: '用户名已经存在，请选择一个新的用户名' };
-  }
-  // 22001 = string_data_right_truncation：超出列长度定义
-  if (errCode === '22001') {
-    return { code: 'TOO_LONG', message: '输入内容超出长度限制' };
-  }
-  if (res.status === 401 || res.status === 403) {
-    return {
-      code: 'PERMISSION_DENIED',
-      message: '接口鉴权失败，请确认 TCB_API_KEY 填的是 API Key（不是 Publishable Key）',
-      upstream: pgErrorMessage(res),
-    };
-  }
-  if (errCode === 'PGRST205' || res.status === 404) {
-    return {
-      code: 'TABLE_NOT_FOUND',
-      message: `数据表 ${TABLE} 不存在或不在 public schema 下`,
-      upstream: pgErrorMessage(res),
-    };
-  }
-
-  return { code: 'SERVER_ERROR', message: pgErrorMessage(res), upstreamCode: errCode };
-}
-
-// ---------- 登录 ----------
-async function login(payload = {}) {
-  const { user_id, pw } = payload;
-
-  if (!user_id || !pw) {
-    return { code: 'BAD_PARAMS', message: '请输入账号和密码' };
-  }
-
-  const q = (f) =>
-    `?select=${f}&user_id=eq.${encodeURIComponent(user_id)}&pw=eq.${encodeURIComponent(pw)}&limit=1`;
-
-  let res = await rest(q(fields()));
-
-  if (!res.ok && pgErrorCode(res) === '42703' && useFullFields) {
-    useFullFields = false;
-    res = await rest(q(fields()));
-  }
-
-  if (!res.ok) {
-    const errCode = pgErrorCode(res);
-    if (res.status === 401 || res.status === 403) {
-      return {
-        code: 'PERMISSION_DENIED',
-        message: '接口鉴权失败，请确认 TCB_API_KEY 填的是 API Key（不是 Publishable Key）',
-        upstream: pgErrorMessage(res),
-      };
-    }
-    if (errCode === 'PGRST205' || res.status === 404) {
-      return {
-        code: 'TABLE_NOT_FOUND',
-        message: `数据表 ${TABLE} 不存在或不在 public schema 下`,
-        upstream: pgErrorMessage(res),
-      };
-    }
-    return { code: 'SERVER_ERROR', message: pgErrorMessage(res), upstreamCode: errCode };
-  }
-
-  const rows = Array.isArray(res.data) ? res.data : [];
-  if (rows.length === 0) {
-    return { code: 'BAD_CREDENTIALS', message: '账号或密码错误' };
-  }
-  return { code: 'OK', user: sanitize(rows[0]) };
-}
-
-// ---------- 自检：配置检查（不联网） ----------
+// ---------- ping：配置自检（不联网） ----------
 async function ping() {
   return {
     code: API_KEY ? 'OK' : 'MISSING_KEY',
-    message: API_KEY ? '环境变量已就绪，可用 gateway 动作测试连通性' : '缺少环境变量 TCB_API_KEY',
     envId: ENV_ID,
     table: TABLE,
-    url: BASE_URL,
-    hasApiKey: Boolean(API_KEY),
-    apiKeyPrefix: API_KEY ? `${API_KEY.slice(0, 4)}***` : null,
-    note: '当前数据层走 HTTP API，不使用 PG_CONNECTION_STRING，也不需要 pg 依赖',
+    hasApiKey: !!API_KEY,
+    hint: API_KEY
+      ? '配置齐全，可执行 gateway / register / login'
+      : '缺少环境变量 TCB_API_KEY，请到函数配置 → 环境变量里设置',
   };
 }
 
-// ---------- 自检：连通性探测 ----------
+// ---------- gateway：数据库连通性探测 ----------
 async function gatewayProbe() {
-  const url = `${BASE_URL}?select=${fields()}&limit=1`;
+  const url = `${BASE}/${TABLE}?select=user_id&limit=0`;
+  if (!API_KEY) {
+    return { code: 'MISSING_KEY', url, hint: '缺少环境变量 TCB_API_KEY' };
+  }
   const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
   try {
-    const res = await rest(`?select=${fields()}&limit=1`);
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+        Accept: 'application/json',
+        Prefer: 'count=exact',
+      },
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    // PostgREST 用 Content-Range 头返回总数：0-0/12 → 12
+    let rowCount = null;
+    const range = res.headers.get('content-range');
+    if (range && range.includes('/')) {
+      const total = range.split('/')[1];
+      if (total !== '*') rowCount = Number(total);
+    }
     return {
       code: res.ok ? 'OK' : 'HTTP_ERROR',
       url,
       httpStatus: res.status,
       elapsedMs: Date.now() - started,
-      body: typeof res.data === 'string' ? res.data.slice(0, 500) : JSON.stringify(res.data).slice(0, 500),
-      rowCount: Array.isArray(res.data) ? res.data.length : null,
+      rowCount,
+      body: text.slice(0, 500),
       hint: res.ok
-        ? res.data && res.data.length
-          ? '网关可用，且表里已有数据'
-          : '网关可用，表可访问（当前为空表）'
-        : `网关有响应但拒绝了请求：${pgErrorMessage(res)}`,
+        ? '网关可用：注册/登录走这条路，不需要 VPC 和数据库公网地址'
+        : '网关有响应但拒绝了请求，看 body 内容定位（多半是 Key 类型或权限）',
     };
   } catch (e) {
     return {
-      code: e.code === 'MISSING_KEY' ? 'MISSING_KEY' : 'GATEWAY_UNREACHABLE',
+      code: 'GATEWAY_UNREACHABLE',
       url,
       elapsedMs: Date.now() - started,
       errorName: e.name,
       errorMessage: e.message,
-      hint:
-        e.code === 'MISSING_KEY'
-          ? '到控制台「ApiKey 管理」拿一把 API Key 填进函数环境变量'
-          : '云函数连不上平台网关（少见），可能需要开公网访问',
+      hint: '云函数连不上平台网关（少见），可能需要开公网访问',
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-// ---------- 入口 ----------
+// ---------- register：注册 ----------
+async function register({ user_id, pw, name, admin = false, type = null, job = null, branch }) {
+  if (!user_id || !pw || !name || !branch) {
+    return { code: 'BAD_REQUEST', message: 'user_id、pw、name、branch 必填' };
+  }
+  if (String(pw).length < 6) {
+    return { code: 'BAD_REQUEST', message: '密码至少 6 位' };
+  }
+
+  // 先查一遍，给出比唯一索引报错更友好的提示
+  const dup = await rest(`?select=user_id&user_id=eq.${encodeURIComponent(user_id)}&limit=1`);
+  if (dup.ok && Array.isArray(dup.data) && dup.data.length > 0) {
+    return { code: 'USER_EXISTS', message: '该账号已注册' };
+  }
+
+  const baseBody = {
+    user_id: String(user_id).trim(),
+    pw: String(pw),
+    name: String(name).trim(),
+    admin: !!admin,
+    type: type || null,
+    job: job || null,
+    branch: String(branch).trim(),
+  };
+
+  const doInsert = (withCreatedAt) =>
+    rest(`?select=${fields()}`, {
+      method: 'POST',
+      body: withCreatedAt ? { ...baseBody, created_at: new Date().toISOString() } : baseBody,
+      prefer: 'return=representation',
+    });
+
+  let res = await doInsert(true);
+
+  // created_at 列不存在时降级：去掉时间戳再插一次
+  if (!res.ok && isColumnMissing(res)) {
+    res = await doInsert(false);
+  }
+
+  if (isTableMissing(res)) {
+    return { code: 'TABLE_NOT_FOUND', message: `表 ${TABLE} 不存在（或不在 public schema）`, upstream: upstream(res) };
+  }
+  if (isNoPermission(res)) {
+    return { code: 'PERMISSION_DENIED', message: 'API Key 无权访问该表，检查 Key 类型或表授权', upstream: upstream(res) };
+  }
+  if (isDup(res)) {
+    return { code: 'USER_EXISTS', message: '该账号已注册' };
+  }
+  if (!res.ok) {
+    return { code: 'INSERT_FAILED', message: `写入失败（HTTP ${res.status}）`, upstream: upstream(res) };
+  }
+
+  const row = Array.isArray(res.data) ? res.data[0] : null;
+  if (!row) {
+    return { code: 'NO_RETURNED_ROW', message: '写入成功但未返回数据，检查权限/RLS', upstream: upstream(res) };
+  }
+  return { code: 'OK', user: row };
+}
+
+// ---------- login：登录 ----------
+async function login({ user_id, pw }) {
+  if (!user_id || !pw) {
+    return { code: 'BAD_REQUEST', message: 'user_id、pw 必填' };
+  }
+
+  const q = `?select=${fields()}&user_id=eq.${encodeURIComponent(user_id)}&pw=eq.${encodeURIComponent(pw)}&limit=1`;
+  const res = await rest(q);
+
+  if (isTableMissing(res)) {
+    return { code: 'TABLE_NOT_FOUND', message: `表 ${TABLE} 不存在（或不在 public schema）`, upstream: upstream(res) };
+  }
+  if (isNoPermission(res)) {
+    return { code: 'PERMISSION_DENIED', message: 'API Key 无权访问该表，检查 Key 类型或表授权', upstream: upstream(res) };
+  }
+  if (!res.ok) {
+    return { code: 'QUERY_FAILED', message: `查询失败（HTTP ${res.status}）`, upstream: upstream(res) };
+  }
+
+  const row = Array.isArray(res.data) ? res.data[0] : null;
+  if (!row) {
+    return { code: 'BAD_CREDENTIALS', message: '账号或密码错误' };
+  }
+  return { code: 'OK', user: row };
+}
+
+// ---------- 入口（事件函数） ----------
 exports.main = async (event = {}) => {
   const { action, payload = {} } = event;
 

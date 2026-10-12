@@ -1,11 +1,25 @@
-// CloudBase 初始化与数据访问层
+// CloudBase 初始化与数据访问层（@cloudbase/js-sdk v2）
 // 通过环境变量 VITE_USE_MOCK 切换真实接入 / 本地 mock，方便离线调试
+//
+// 鉴权说明（v2）：
+//   本系统的账号/权限逻辑完全在自建的 user_table（云函数里）维护。
+//   前端访问 CloudBase 平台服务（callFunction、database）需要：
+//     1. init 时传 accessKey（Publishable Key，控制台「ApiKey 管理」获取）
+//     2. 调用 auth.signInAnonymously() 拿到匿名登录态
+//   匿名登录与用户注册/登录无关：它只是“调用云函数的门票”，
+//   真实账号仍由 userService 云函数写入 user_table 来管理。
+//
+// ⚠️ 升级到 v2 后必须做三件事：
+//   1. npm install @cloudbase/js-sdk@latest
+//   2. .env.local 里配置 VITE_TCB_ACCESS_KEY（Publishable Key）
+//   3. 控制台 → 身份认证 → 登录方式 → 开启「匿名登录」（你已经开了）
 
 import cloudbase from '@cloudbase/js-sdk';
 import dayjs from 'dayjs';
 import { calcTotal, calcGrade, matchBranch, findBranchLabel } from './constants';
 
 const ENV_ID = import.meta.env.VITE_TCB_ENV;
+const ACCESS_KEY = import.meta.env.VITE_TCB_ACCESS_KEY;
 const USE_MOCK = String(import.meta.env.VITE_USE_MOCK).toLowerCase() === 'true';
 const COLLECTION = 'evaluations';
 
@@ -26,26 +40,30 @@ const writeMock = (list) => localStorage.setItem(MOCK_KEY, JSON.stringify(list))
 // ---------- 初始化 ----------
 export async function initCloudBase() {
   if (USE_MOCK) return { mock: true };
-  if (!ENV_ID) {
-    console.warn('[CloudBase] 未配置 VITE_TCB_ENV，将使用 Mock 模式');
+  if (!ENV_ID || !ACCESS_KEY) {
+    console.error(
+      '[CloudBase] 环境变量不完整：',
+      !ENV_ID ? '缺少 VITE_TCB_ENV ' : '',
+      !ACCESS_KEY ? '缺少 VITE_TCB_ACCESS_KEY（Publishable Key）' : ''
+    );
     return { mock: true };
   }
   if (!app) {
-    app = cloudbase.init({ env: ENV_ID });
-    // 匿名登录：调用云函数要走 CloudBase 平台鉴权，必须持有登录态。
-    // 本系统的账号体系在自建的 user_table 里（不用云开发身份），所以只需要
-    // 一个匿名登录态来通过平台鉴权。
-    // ⚠️ 本项目用的是 @cloudbase/js-sdk 1.x，匿名登录只有这一种写法；
-    //    v2 的 auth().signInAnonymously() 在 1.x 中不存在，调用会抛 TypeError
-    //    并被 catch 吞掉，表现为「后续 callFunction 报鉴权失败」。
+    // v2 初始化：必须带 accessKey
+    app = cloudbase.init({
+      env: ENV_ID,
+      accessKey: ACCESS_KEY,
+    });
+    // v2 匿名登录：拿到平台登录态，callFunction / database 才能通过鉴权
     try {
-      const auth = app.auth({ persistence: 'local' });
-      if (!auth.hasLoginState()) {
-        await auth.anonymousAuthProvider().signIn();
-      }
+      const auth = app.auth();
+      await auth.signInAnonymously();
     } catch (e) {
       console.error('[CloudBase] 匿名登录失败：', e);
-      console.error('[CloudBase] 请到控制台 → 身份认证/登录授权 → 开启「匿名登录」后刷新页面');
+      console.error(
+        '[CloudBase] 请确认：① 已安装 @cloudbase/js-sdk v2（v1 没有 signInAnonymously）；' +
+          '② 控制台「身份认证 → 登录方式 → 匿名登录」已开启'
+      );
     }
     _db = app.database();
   }
@@ -207,4 +225,4 @@ export async function deleteEvaluation(id) {
 }
 
 // 提供给前端判断当前是否 mock
-export const isMockMode = () => USE_MOCK || !ENV_ID;
+export const isMockMode = () => USE_MOCK || !ENV_ID || !ACCESS_KEY;
