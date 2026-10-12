@@ -1,0 +1,13 @@
+node_modules
+dist
+.env
+.env.local
+*.log
+.DS_Store
+.vite
+
+# 云函数部署包（在控制台手工上传即可，不进仓库）
+*.zip
+
+# 云函数本地安装的依赖（云端会自行 npm install）
+cloudfunctions/*/node_modules

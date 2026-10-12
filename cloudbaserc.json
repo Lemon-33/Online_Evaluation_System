@@ -1,0 +1,28 @@
+{
+  "version": "2.0",
+  "envId": "lhr20000711-d0gfnvzhdf1b2802d",
+  "functionRoot": "./cloudfunctions",
+  "functions": [
+    {
+      "name": "userService",
+      "runtime": "Nodejs18.15",
+      "handler": "index.main",
+      "timeout": 10,
+      "memorySize": 256,
+      "installDependency": true
+    }
+  ],
+  "framework": {
+    "name": "vue-react",
+    "plugins": {
+      "tcb-framework-static": {
+        "use": "@cloudbase/framework-plugin-static",
+        "inputs": {
+          "uploadPath": "dist",
+          "publicPath": "/",
+          "ignore": ["node_modules/**", ".git/**"]
+        }
+      }
+    }
+  }
+}
