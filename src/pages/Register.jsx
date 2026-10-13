@@ -16,7 +16,6 @@ import {
   ROLES,
   POSITION_TYPES,
   BRANCHES,
-  ADMIN_INVITE_CODE,
   getPositionsByType,
 } from '../lib/constants';
 import { useAuth } from '../context/AuthContext';
@@ -198,13 +197,14 @@ export default function Register() {
                 rules={[
                   { required: true, message: '请输入管理员密钥' },
                   {
+                    // 只校验格式，密钥是否正确由后端判定（前端不保存密钥）
                     validator: (_, value) =>
-                      value === ADMIN_INVITE_CODE
+                      !value || /^[A-Za-z0-9]{8}$/.test(value)
                         ? Promise.resolve()
-                        : Promise.reject(new Error('管理员密钥不正确')),
+                        : Promise.reject(new Error('密钥为 8 位字母或数字')),
                   },
                 ]}
-                extra="注册管理员需要密钥，请向系统管理员获取"
+                extra="两个党支部密钥不同，请向所在支部管理员获取"
               >
                 <Input
                   placeholder="请输入 8 位管理员密钥"

@@ -106,6 +106,13 @@ export default function AppLayout() {
             menu={{
               items: [
                 {
+                  key: 'profile',
+                  icon: <UserOutlined />,
+                  label: '个人信息',
+                  onClick: () => nav('/profile'),
+                },
+                { type: 'divider' },
+                {
                   key: 'logout',
                   icon: <LogoutOutlined />,
                   label: '退出登录',

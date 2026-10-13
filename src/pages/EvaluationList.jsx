@@ -28,6 +28,7 @@ import { useAuth } from '../context/AuthContext';
 export default function EvaluationList() {
   const { can, user } = useAuth();
   const [year, setYear] = useState(new Date().getFullYear());
+  const [month, setMonth] = useState(''); // '' = 全年，1-12 = 指定月份
   const [status, setStatus] = useState('');
   const [keyword, setKeyword] = useState('');
   const [list, setList] = useState([]);
@@ -39,7 +40,7 @@ export default function EvaluationList() {
   const reload = async () => {
     setLoading(true);
     try {
-      const data = await listEvaluations({ year, status, keyword, branch: scopeBranch });
+      const data = await listEvaluations({ year, month, status, keyword, branch: scopeBranch });
       setList(data);
     } catch (e) {
       console.error(e);
@@ -52,7 +53,7 @@ export default function EvaluationList() {
   useEffect(() => {
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, status]);
+  }, [year, month, status]);
 
   const stats = useMemo(() => {
     const total = list.length;
@@ -100,16 +101,16 @@ export default function EvaluationList() {
     },
     { title: '年度', dataIndex: 'year', width: 80 },
     {
+      title: '月份',
+      dataIndex: 'month',
+      width: 70,
+      render: (v) => `${v || 1} 月`,
+    },
+    {
       title: '自评分',
       dataIndex: 'selfTotal',
       width: 90,
       render: (v) => (v != null ? `${v}` : '-'),
-    },
-    {
-      title: '自评等级',
-      dataIndex: 'selfGrade',
-      width: 90,
-      render: (g) => g && <Tag color={g === '优秀' ? 'green' : g === '良好' ? 'blue' : 'orange'}>{g}</Tag>,
     },
     {
       title: '审核分',
@@ -188,11 +189,23 @@ export default function EvaluationList() {
         <Select
           value={year}
           onChange={setYear}
-          style={{ width: 120 }}
+          style={{ width: 100 }}
           options={[
+            { value: 2027, label: 2027 },
             { value: 2026, label: 2026 },
-            { value: 2025, label: 2025 },
-            { value: 2024, label: 2024 },
+          ]}
+        />
+        <span>月份：</span>
+        <Select
+          value={month}
+          onChange={setMonth}
+          style={{ width: 100 }}
+          options={[
+            { value: '', label: '全年' },
+            ...Array.from({ length: 12 }, (_, i) => ({
+              value: i + 1,
+              label: `${i + 1} 月`,
+            })),
           ]}
         />
         <span>状态：</span>

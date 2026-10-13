@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { ROLES, ADMIN_INVITE_CODE } from '../lib/constants';
+import { ROLES } from '../lib/constants';
 import { registerUser, loginUser } from '../lib/userService';
 
 const AuthContext = createContext(null);
@@ -23,7 +23,7 @@ export function AuthProvider({ children }) {
     else localStorage.removeItem(SESSION_KEY);
   }, [user]);
 
-  // ---------- 注册（写入 PostgreSQL） ----------
+  // ---------- 注册（写入 SQLite） ----------
   const register = async ({
     username,
     password,
@@ -40,9 +40,9 @@ export function AuthProvider({ children }) {
     if (role === ROLES.EMPLOYEE && (!position || !positionType)) {
       throw new Error('员工必须选择岗位类型和所在岗位');
     }
-    // 管理员必须校验密钥（表单已校验一次，此处兜底防止绕过 UI）
-    if (role === ROLES.ADMIN && adminCode !== ADMIN_INVITE_CODE) {
-      throw new Error('管理员密钥不正确');
+    // 前端只校验"填了没"，密钥正确与否由后端判定（前端源码会打包公开，不能存密钥）
+    if (role === ROLES.ADMIN && !adminCode) {
+      throw new Error('请输入管理员密钥');
     }
     if (!branch) {
       throw new Error('必须选择所在党支部');
@@ -58,11 +58,16 @@ export function AuthProvider({ children }) {
         position,
         positionType,
         branch,
+        adminCode,
       });
     } catch (e) {
       throw new Error(e.message || '网络异常，注册失败，请稍后重试');
     }
 
+    // 后端判定：管理员密钥不正确
+    if (res.code === 'BAD_ADMIN_CODE') {
+      throw new Error('管理员密钥不正确');
+    }
     // 数据库已存在同名 user_id
     if (res.code === 'USER_EXISTS') {
       throw new Error('用户名已经存在，请选择一个新的用户名');

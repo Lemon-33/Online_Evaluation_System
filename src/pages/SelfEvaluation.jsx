@@ -15,6 +15,8 @@ import {
   Empty,
   Divider,
   Select,
+  Radio,
+  Tooltip,
 } from 'antd';
 import {
   CheckCircleOutlined,
@@ -22,50 +24,78 @@ import {
   EditOutlined,
   TrophyOutlined,
   StarFilled,
+  CalendarOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
   SCORE_DIMENSIONS,
   calcTotal,
   calcGrade,
+  calcFormTotal,
+  calcFormGrade,
+  getPositionForm,
   POSITION_TYPES,
-  BRANCHES,
   findLabel,
   findPositionLabel,
 } from '../lib/constants';
-import { getMyEvaluation, submitSelfEvaluation } from '../lib/cloudbase';
+import { getMyEvaluation, submitSelfEvaluation, listEvaluations } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
 
 export default function SelfEvaluation() {
   const { user } = useAuth();
   const [form] = Form.useForm();
   const [year, setYear] = useState(dayjs().year());
+  const [month, setMonth] = useState(dayjs().month() + 1);
   const [existing, setExisting] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [scores, setScores] = useState({});
   const [loaded, setLoaded] = useState(false);
+  // 月历数据：{ [月份]: reviewStatus }，记录当年各月是否已提交
+  const [monthRecords, setMonthRecords] = useState({});
 
+  // 提交时间不允许晚于当前月份（如今天是 2026-10-13，则 2026-11 及以后不可选）
+  const isFutureMonth = (y, m) => {
+    const now = dayjs();
+    return y > now.year() || (y === now.year() && m > now.month() + 1);
+  };
+
+  // 评价周期从 2026 年开始；未来年份不允许提交，因此最多到当前年
   const years = useMemo(() => {
     const now = dayjs().year();
-    return [now, now - 1, now + 1];
+    const arr = [];
+    for (let y = 2026; y <= now; y++) arr.push(y);
+    return arr.reverse(); // 最近的年份排前面
   }, []);
 
-  const reload = async (y) => {
+  const reload = async (y, m) => {
     if (!user?.name) return;
-    const rec = await getMyEvaluation(user.name, y);
+    // 并行取两份数据：当前月的记录 + 当年全部记录（供月历展示）
+    const [rec, all] = await Promise.all([
+      getMyEvaluation(user.name, y, m),
+      listEvaluations({ year: y, keyword: user.name }),
+    ]);
     setExisting(rec);
-    if (rec) {
-      form.setFieldsValue({
-        selfContent: rec.selfContent,
-        partyBranch: user?.branch || rec.partyBranch || '',
-        scores: rec.scores || {},
+    // keyword 是模糊搜索（"张三"可能搜到"张三丰"），需精确过滤本人
+    const byMonth = {};
+    all
+      .filter((x) => x.name === user.name)
+      .forEach((x) => {
+        byMonth[x.month || 1] = x.reviewStatus;
       });
-      setScores(rec.scores || {});
+    setMonthRecords(byMonth);
+    if (rec) {
+      // 兼容两种历史数据：岗位表单（scores.answers）与通用 5 项（直接分值）
+      form.setFieldsValue({
+        partyBranch: user?.branch || rec.partyBranch || '',
+        scores: rec.scores?.answers ? {} : rec.scores || {},
+        answers: rec.scores?.answers || {},
+      });
+      setScores(rec.scores?.answers ? {} : rec.scores || {});
     } else {
       form.setFieldsValue({
-        selfContent: '',
         partyBranch: user?.branch || '',
         scores: {},
+        answers: {},
       });
       setScores({});
     }
@@ -73,33 +103,64 @@ export default function SelfEvaluation() {
   };
 
   useEffect(() => {
-    reload(year);
+    reload(year, month);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, user]);
+  }, [year, month, user]);
 
+  // 岗位专属表单（有配置则用选择题模式，没有则走通用 5 项打分）
+  const formDef = getPositionForm(user?.position);
   const watchedScores = Form.useWatch('scores', form) || scores;
-  const total = calcTotal(watchedScores);
+  const watchedAnswers = Form.useWatch('answers', form) || {};
+  const total = formDef
+    ? calcFormTotal(formDef, watchedAnswers)
+    : calcTotal(watchedScores);
+  const fullScore = formDef ? formDef.fullScore : 100;
 
   const onSubmit = async () => {
+    // 该月自评已通过审核 → 已锁定，不允许再提交/覆盖
+    if (locked) {
+      message.warning('当月自评已经通过审核，无法提交新的自评');
+      return;
+    }
     try {
+      // 提交时间不能晚于当前月份（月份下拉里未来月份已禁用，此处兜底校验）
+      if (isFutureMonth(year, month)) {
+        message.warning(
+          `不能选择当前日期之后的月份提交（今天是 ${dayjs().format('YYYY年M月D日')}），请修改提交时间`
+        );
+        return;
+      }
       const values = await form.validateFields();
       setSubmitting(true);
-      await submitSelfEvaluation({
+      const payload = {
         ...values,
         name: user.name,
         position: user.position,
         positionType: user.positionType,
         branch: user.branch, // 所属党支部（注册时确定）
         year,
-      });
-      message.success('自评提交成功，等待审核');
-      reload(year);
+        month, // 评价周期精确到月
+      };
+      if (formDef) {
+        // 岗位专属表单：总分按所选选项计算，只存每题的选择
+        const t = calcFormTotal(formDef, values.answers || {});
+        payload.scores = { answers: values.answers || {} };
+        payload.selfTotal = t;
+      }
+      await submitSelfEvaluation(payload);
+      message.success(
+        existing
+          ? `已覆盖更新 ${year} 年 ${month} 月的自评，审核人以本次提交为准`
+          : `${year} 年 ${month} 月自评提交成功，等待审核`
+      );
+      reload(year, month);
     } catch (e) {
       if (e?.errorFields) {
         message.warning('请检查表单填写是否完整');
       } else {
         console.error(e);
-        message.error('提交失败，请稍后再试');
+        // 后端返回的“已审核不能覆盖”等原因直接展示给用户
+        message.error(e?.message || '提交失败，请稍后再试');
       }
     } finally {
       setSubmitting(false);
@@ -145,6 +206,7 @@ export default function SelfEvaluation() {
             </Button>
           ))}
         </Space.Compact>
+        <span>月份在右侧月历中选择：</span>
         {reviewed && <Tag color="green" icon={<CheckCircleOutlined />}>已审核</Tag>}
         {pending && <Tag color="orange" icon={<ExclamationCircleOutlined />}>待审核</Tag>}
       </Space>
@@ -157,7 +219,7 @@ export default function SelfEvaluation() {
             description={
               <div>
                 <div style={{ fontSize: 16, fontWeight: 600 }}>
-                  您在 {year} 年度还没有自评记录
+                  您在 {year} 年 {month} 月还没有自评记录
                 </div>
                 <div className="muted" style={{ marginTop: 6 }}>
                   请在下方填写本年度党员自评，并点击「提交自评」
@@ -183,104 +245,151 @@ export default function SelfEvaluation() {
       <Form form={form} layout="vertical" disabled={locked}>
         <Row gutter={16}>
           <Col span={16}>
-            <Card title="基本信息">
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item label="姓名">
-                    <Input value={user?.name} disabled />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item label="身份">
-                    <Input value="员工（党员）" disabled />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item label="岗位类型">
-                    <Input
-                      value={findLabel(POSITION_TYPES, user?.positionType)}
-                      disabled
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item label="所在岗位">
-                    <Input value={findPositionLabel(user?.position)} disabled />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item
-                    label="所在党支部"
-                    name="partyBranch"
-                    rules={[{ required: true, message: '请选择党支部' }]}
-                    extra="取自注册时选择的所属党支部，不可修改"
-                  >
-                    <Select
-                      options={BRANCHES}
-                      disabled={!!user?.branch}
-                      placeholder="请在注册时选择所属党支部"
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
-            </Card>
-
-            <Card title="分项自评（总分 100）" style={{ marginTop: 16 }}>
-              {SCORE_DIMENSIONS.map((d) => (
-                <Row key={d.key} gutter={16} align="middle" style={{ marginBottom: 12 }}>
-                  <Col span={6}>
-                    <div style={{ fontWeight: 600 }}>{d.label}</div>
-                    <div className="muted" style={{ fontSize: 12 }}>{d.desc}</div>
-                  </Col>
-                  <Col span={12}>
-                    <Form.Item
-                      name={['scores', d.key]}
-                      rules={[
-                        { required: true, message: '请打分' },
-                        { type: 'number', min: 0, max: d.max, message: `0 - ${d.max} 分` },
-                      ]}
-                      style={{ marginBottom: 0 }}
+            {/* 基本信息已移至「个人信息」页（点击顶栏右上角姓名进入） */}
+            {formDef ? (
+              // 岗位专属表单：选择题模式，选项后直接标注分值
+              formDef.sections.map((sec) => (
+                <Card
+                  key={sec.title}
+                  title={sec.title}
+                  style={{ marginTop: 16 }}
+                  extra={
+                    sec.hint ? (
+                      <span className="muted" style={{ fontSize: 12 }}>{sec.hint}</span>
+                    ) : undefined
+                  }
+                >
+                  {sec.items.map((it, idx) => (
+                    <div
+                      key={it.key}
+                      style={{ marginBottom: idx === sec.items.length - 1 ? 0 : 20 }}
                     >
+                      <div style={{ fontWeight: 600, marginBottom: 8 }}>
+                        {idx + 1}. {it.label}
+                      </div>
+                      <Form.Item
+                        name={['answers', it.key]}
+                        rules={[{ required: true, message: '请选择一个选项' }]}
+                        style={{ marginBottom: 0 }}
+                      >
+                        <Radio.Group>
+                          <Space direction="vertical">
+                            {it.options.map((o) => (
+                              <Radio key={o.value} value={o.value}>
+                                {o.label}
+                                <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                                  {o.score > 0 ? `+${o.score} 分` : '不加分'}
+                                </span>
+                              </Radio>
+                            ))}
+                          </Space>
+                        </Radio.Group>
+                      </Form.Item>
+                    </div>
+                  ))}
+                </Card>
+              ))
+            ) : (
+              <Card title="分项自评（总分 100）" style={{ marginTop: 16 }}>
+                {SCORE_DIMENSIONS.map((d) => (
+                  <Row key={d.key} gutter={16} align="middle" style={{ marginBottom: 12 }}>
+                    <Col span={6}>
+                      <div style={{ fontWeight: 600 }}>{d.label}</div>
+                      <div className="muted" style={{ fontSize: 12 }}>{d.desc}</div>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item
+                        name={['scores', d.key]}
+                        rules={[
+                          { required: true, message: '请打分' },
+                          { type: 'number', min: 0, max: d.max, message: `0 - ${d.max} 分` },
+                        ]}
+                        style={{ marginBottom: 0 }}
+                      >
+                        <InputNumber
+                          min={0}
+                          max={d.max}
+                          step={1}
+                          style={{ width: '100%' }}
+                          addonAfter={`/ ${d.max}`}
+                          onChange={(v) => setScores((s) => ({ ...s, [d.key]: v ?? 0 }))}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col span={6}>
                       <InputNumber
                         min={0}
                         max={d.max}
                         step={1}
+                        value={Math.round(((watchedScores?.[d.key] || 0) / d.max) * 100)}
+                        formatter={(v) => `${v || 0}%`}
+                        parser={(v) => v?.replace('%', '') || 0}
+                        disabled
                         style={{ width: '100%' }}
-                        addonAfter={`/ ${d.max}`}
-                        onChange={(v) => setScores((s) => ({ ...s, [d.key]: v ?? 0 }))}
                       />
-                    </Form.Item>
-                  </Col>
-                  <Col span={6}>
-                    <InputNumber
-                      min={0}
-                      max={d.max}
-                      step={1}
-                      value={Math.round(((watchedScores?.[d.key] || 0) / d.max) * 100)}
-                      formatter={(v) => `${v || 0}%`}
-                      parser={(v) => v?.replace('%', '') || 0}
-                      disabled
-                      style={{ width: '100%' }}
-                    />
-                  </Col>
-                </Row>
-              ))}
-            </Card>
-
-            <Card title="自评总结" style={{ marginTop: 16 }}>
-              <Form.Item
-                label="本年度思想、工作、作风等方面自评总结"
-                name="selfContent"
-                rules={[{ required: true, message: '请填写自评总结', min: 20 }]}
-              >
-                <Input.TextArea rows={6} placeholder="不少于 20 字" showCount />
-              </Form.Item>
-            </Card>
+                    </Col>
+                  </Row>
+                ))}
+              </Card>
+            )}
           </Col>
 
           <Col span={8}>
+            {/* 提交月历：当年各月提交状态一览，点格子可直接切换月份 */}
+            <Card
+              title={
+                <Space>
+                  <CalendarOutlined style={{ color: '#1677ff' }} />
+                  <span>{year} 年提交月历</span>
+                </Space>
+              }
+            >
+              <div className="mini-cal">
+                {Array.from({ length: 12 }, (_, i) => {
+                  const m = i + 1;
+                  const st = monthRecords[m];
+                  const future = isFutureMonth(year, m);
+                  const cls = [
+                    'mini-cal-cell',
+                    st === 'reviewed' ? 'is-done' : st === 'pending' ? 'is-pending' : '',
+                    future ? 'is-future' : '',
+                    m === month ? 'is-cur' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ');
+                  const tip = future
+                    ? `${m} 月：未来月份，不可提交`
+                    : st === 'reviewed'
+                    ? `${m} 月：已审核`
+                    : st === 'pending'
+                    ? `${m} 月：已提交，待审核`
+                    : `${m} 月：未提交，点击填写`;
+                  return (
+                    <Tooltip key={m} title={tip}>
+                      <div
+                        className={cls}
+                        onClick={() => !future && setMonth(m)}
+                      >
+                        {m}月
+                      </div>
+                    </Tooltip>
+                  );
+                })}
+              </div>
+              <div className="mini-cal-legend">
+                <span><i className="dot dot-pending" />待审核</span>
+                <span><i className="dot dot-done" />已审核</span>
+                <span><i className="dot dot-free" />未提交</span>
+                <span><i className="dot dot-future" />不可选</span>
+              </div>
+              <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+                只能提交当前月份及之前的自评，点击月份可切换查看
+              </div>
+            </Card>
+
             <Card
               className="score-card"
+              style={{ marginTop: 16 }}
               title={
                 <Space>
                   <StarFilled style={{ color: '#faad14' }} />
@@ -290,21 +399,9 @@ export default function SelfEvaluation() {
             >
               <Statistic
                 value={total}
-                suffix="/ 100"
-                valueStyle={{
-                  color: total >= 75 ? '#3f8600' : total >= 60 ? '#faad14' : '#cf1322',
-                  fontSize: 36,
-                }}
+                suffix={` / ${fullScore}`}
+                valueStyle={{ color: '#b71c1c', fontSize: 36 }}
               />
-              <div style={{ marginTop: 12 }}>
-                <Tag
-                  icon={total >= 60 ? <CheckCircleOutlined /> : <ExclamationCircleOutlined />}
-                  color={total >= 90 ? 'green' : total >= 75 ? 'blue' : total >= 60 ? 'gold' : 'red'}
-                  style={{ fontSize: 16, padding: '4px 12px' }}
-                >
-                  自评等级：{calcGrade(total)}
-                </Tag>
-              </div>
               <Divider style={{ margin: '12px 0' }} />
               <div className="muted" style={{ fontSize: 12 }}>
                 * 提交后由管理员完成最终审核评分
@@ -318,7 +415,6 @@ export default function SelfEvaluation() {
                 size="large"
                 loading={submitting}
                 onClick={onSubmit}
-                disabled={locked}
                 icon={<EditOutlined />}
               >
                 {existing ? '更新自评' : '提交自评'}
@@ -340,12 +436,14 @@ export default function SelfEvaluation() {
                 <Statistic
                   title="最终审核分"
                   value={existing.reviewScore}
-                  suffix="/ 100"
+                  suffix={` / ${fullScore}`}
                   valueStyle={{ color: '#3f8600', fontSize: 32 }}
                 />
                 <div style={{ marginTop: 12 }}>
                   <Tag color="green" style={{ fontSize: 16, padding: '4px 12px' }}>
-                    {calcGrade(existing.reviewScore || 0)}
+                    {formDef
+                      ? calcFormGrade(existing.reviewScore || 0, fullScore)
+                      : calcGrade(existing.reviewScore || 0)}
                   </Tag>
                 </div>
                 <Divider style={{ margin: '12px 0' }} />
@@ -365,10 +463,9 @@ export default function SelfEvaluation() {
                 <Statistic
                   title="自评总分"
                   value={existing.selfTotal}
-                  suffix="/ 100"
+                  suffix={` / ${fullScore}`}
                 />
                 <div style={{ marginTop: 8 }}>
-                  <Tag color="blue">{calcGrade(existing.selfTotal || 0)}</Tag>
                   <Tag color="orange">等待管理员审核</Tag>
                 </div>
                 <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>

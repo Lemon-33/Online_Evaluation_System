@@ -27,6 +27,8 @@ import {
 import {
   SCORE_DIMENSIONS,
   calcGrade,
+  calcFormGrade,
+  getPositionForm,
   POSITION_TYPES,
   findLabel,
   findPositionLabel,
@@ -38,6 +40,7 @@ import { useAuth } from '../context/AuthContext';
 export default function Review() {
   const { user } = useAuth();
   const [year, setYear] = useState(new Date().getFullYear());
+  const [month, setMonth] = useState(''); // '' = 全年，1-12 = 指定月份
   const [status, setStatus] = useState('pending');
   const [keyword, setKeyword] = useState('');
   const [list, setList] = useState([]);
@@ -56,9 +59,9 @@ export default function Review() {
     setLoading(true);
     try {
       const [data, p, r] = await Promise.all([
-        listEvaluations({ year, status, keyword, branch: scopeBranch }),
-        listEvaluations({ year, status: 'pending', branch: scopeBranch }),
-        listEvaluations({ year, status: 'reviewed', branch: scopeBranch }),
+        listEvaluations({ year, month, status, keyword, branch: scopeBranch }),
+        listEvaluations({ year, month, status: 'pending', branch: scopeBranch }),
+        listEvaluations({ year, month, status: 'reviewed', branch: scopeBranch }),
       ]);
       setList(data);
       setPendingCount(p.length);
@@ -74,7 +77,7 @@ export default function Review() {
   useEffect(() => {
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, status]);
+  }, [year, month, status]);
 
   const openReview = (rec) => {
     setActive(rec);
@@ -100,6 +103,10 @@ export default function Review() {
     }
   };
 
+  // 当前审核记录若属于已配置专属表单的岗位，按该岗位满分展示与评分
+  const activeFormDef = active ? getPositionForm(active.position) : null;
+  const activeFull = activeFormDef?.fullScore || 100;
+
   const columns = [
     { title: '姓名', dataIndex: 'name', width: 100 },
     {
@@ -107,6 +114,12 @@ export default function Review() {
       width: 200,
       render: (_, r) =>
         `${findPositionLabel(r.position)} / ${findLabel(POSITION_TYPES, r.positionType)}`,
+    },
+    {
+      title: '月份',
+      dataIndex: 'month',
+      width: 70,
+      render: (v) => `${v || 1} 月`,
     },
     {
       title: '党支部',
@@ -117,13 +130,16 @@ export default function Review() {
     {
       title: '自评总分',
       dataIndex: 'selfTotal',
-      width: 100,
-      render: (v) => <Tag color={v >= 75 ? 'blue' : 'red'}>{v} 分</Tag>,
-    },
-    {
-      title: '自评等级',
-      dataIndex: 'selfGrade',
-      width: 90,
+      width: 110,
+      render: (v, r) => {
+        const full = getPositionForm(r.position)?.fullScore || 100;
+        const pct = full ? (v / full) * 100 : 0;
+        return (
+          <Tag color={pct >= 75 ? 'blue' : pct >= 60 ? 'gold' : 'red'}>
+            {v} / {full}
+          </Tag>
+        );
+      },
     },
     {
       title: '提交时间',
@@ -227,11 +243,23 @@ export default function Review() {
         <Select
           value={year}
           onChange={setYear}
-          style={{ width: 120 }}
+          style={{ width: 100 }}
           options={[
+            { value: 2027, label: 2027 },
             { value: 2026, label: 2026 },
-            { value: 2025, label: 2025 },
-            { value: 2024, label: 2024 },
+          ]}
+        />
+        <span>月份：</span>
+        <Select
+          value={month}
+          onChange={setMonth}
+          style={{ width: 100 }}
+          options={[
+            { value: '', label: '全年' },
+            ...Array.from({ length: 12 }, (_, i) => ({
+              value: i + 1,
+              label: `${i + 1} 月`,
+            })),
           ]}
         />
         <span>状态：</span>
@@ -294,34 +322,67 @@ export default function Review() {
             </Descriptions>
 
             <div className="section-title">党员自评分项</div>
-            <Descriptions size="small" column={1} bordered>
-              {SCORE_DIMENSIONS.map((d) => (
-                <Descriptions.Item key={d.key} label={`${d.label}（满分 ${d.max}）`}>
-                  {active.scores?.[d.key] ?? 0} 分
+            {active.scores?.answers && activeFormDef ? (
+              // 岗位专属表单：逐题展示所选选项与该项得分
+              <div>
+                {activeFormDef.sections
+                  .flatMap((s) => s.items)
+                  .map((it, i) => {
+                    const chosen = active.scores.answers[it.key];
+                    const opt = it.options.find((o) => o.value === chosen);
+                    return (
+                      <div key={it.key} style={{ padding: '8px 0', borderBottom: '1px solid #f0f0f0' }}>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>
+                          {i + 1}. {it.label}
+                        </div>
+                        <div style={{ marginTop: 4 }}>
+                          {opt ? (
+                            <Space wrap>
+                              <Tag color={opt.score > 0 ? 'green' : 'default'}>{opt.label}</Tag>
+                              <Tag color="blue">得 {opt.score} 分</Tag>
+                            </Space>
+                          ) : (
+                            <span className="muted">未作答</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                <div style={{ marginTop: 12 }}>
+                  <Tag color="blue" style={{ fontSize: 14, padding: '2px 10px' }}>
+                    自评总分 {active.selfTotal} / {activeFull}
+                  </Tag>
+                </div>
+              </div>
+            ) : (
+              <Descriptions size="small" column={1} bordered>
+                {SCORE_DIMENSIONS.map((d) => (
+                  <Descriptions.Item key={d.key} label={`${d.label}（满分 ${d.max}）`}>
+                    {active.scores?.[d.key] ?? 0} 分
+                  </Descriptions.Item>
+                ))}
+                <Descriptions.Item label="自评总分">
+                  <Tag color="blue">{active.selfTotal}</Tag>
                 </Descriptions.Item>
-              ))}
-              <Descriptions.Item label="自评总分">
-                <Tag color="blue">{active.selfTotal}</Tag>
-                <Tag>{active.selfGrade}</Tag>
-              </Descriptions.Item>
-            </Descriptions>
-
-            <div className="section-title">自评总结</div>
-            <div style={{ background: '#fafafa', padding: 12, borderRadius: 6 }}>
-              {active.selfContent || <span className="muted">（党员未填写）</span>}
-            </div>
+              </Descriptions>
+            )}
 
             <div className="section-title">审核评分</div>
             <Form form={form} layout="vertical">
               <Form.Item
                 name="reviewScore"
-                label="审核总分（0-100）"
+                label={`审核总分（0-${activeFull}）`}
                 rules={[
                   { required: true, message: '请填写审核分' },
-                  { type: 'number', min: 0, max: 100 },
+                  { type: 'number', min: 0, max: activeFull },
                 ]}
               >
-                <InputNumber min={0} max={100} style={{ width: 200 }} addonAfter="/ 100" />
+                <InputNumber
+                  min={0}
+                  max={activeFull}
+                  style={{ width: 200 }}
+                  addonAfter={` / ${activeFull}`}
+                />
               </Form.Item>
               <Form.Item
                 name="reviewComment"
@@ -334,7 +395,11 @@ export default function Review() {
 
             <Statistic
               title="当前等级（按审核分）"
-              value={calcGrade(form.getFieldValue('reviewScore') || 0)}
+              value={
+                activeFormDef
+                  ? calcFormGrade(form.getFieldValue('reviewScore') || 0, activeFull)
+                  : calcGrade(form.getFieldValue('reviewScore') || 0)
+              }
             />
           </>
         )}

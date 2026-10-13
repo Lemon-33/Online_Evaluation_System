@@ -16,6 +16,72 @@ html, body, #root {
   font-size: 28px;
 }
 
+/* ===== 自评页：提交月历 ===== */
+.mini-cal {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.mini-cal-cell {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  color: rgba(0, 0, 0, 0.65);
+  transition: all 0.2s;
+}
+.mini-cal-cell.is-pending {
+  background: #fff7e6;
+  border-color: #ffd591;
+  color: #ad6800;
+}
+.mini-cal-cell.is-done {
+  background: #f6ffed;
+  border-color: #b7eb8f;
+  color: #389e0d;
+}
+.mini-cal-cell.is-future {
+  background: #f5f5f5;
+  border-color: #efefef;
+  color: #bfbfbf;
+  cursor: not-allowed;
+}
+.mini-cal-cell.is-cur {
+  outline: 2px solid #1677ff;
+  outline-offset: 1px;
+}
+.mini-cal-cell:not(.is-future):hover {
+  transform: translateY(-1px);
+  border-color: #91caff;
+}
+.mini-cal-legend {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+  flex-wrap: wrap;
+}
+.mini-cal-legend .dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+.mini-cal-legend .dot-pending { background: #ffd591; }
+.mini-cal-legend .dot-done { background: #b7eb8f; }
+.mini-cal-legend .dot-free { background: #e5e7eb; }
+.mini-cal-legend .dot-future { background: #f5f5f5; border: 1px solid #e5e7eb; }
+
 .section-title {
   font-size: 16px;
   font-weight: 600;

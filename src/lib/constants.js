@@ -95,10 +95,106 @@ export const matchBranch = (recordBranch, branch) => {
 };
 
 // ============================================================
+// 岗位专属自评表单（按岗位 value 索引，陆续补充 14 个岗位）
+// ------------------------------------------------------------
+// 结构说明：
+//   fullScore   该岗位表单满分
+//   sections    若干部分，每部分若干道选择题
+//   每道题      key（存库字段名）+ label（题干）+ options（选项挂分值）
+// 提交时只存「每道题选了哪个 value」（scores.answers），
+// 分数由这里的定义计算；审核端用同一份定义还原每题得分。
+// 未配置的岗位继续使用上面的通用 5 项打分表单（SCORE_DIMENSIONS）。
+// ============================================================
+const yesNoOptions = (score) => [
+  { value: 'yes', label: '是', score },
+  { value: 'no', label: '否', score: 0 },
+];
+
+export const POSITION_FORMS = {
+  distributionTech: {
+    label: '配网专业技术岗',
+    fullScore: 45,
+    sections: [
+      {
+        title: '第一部分 · 基础履职',
+        items: [
+          {
+            key: 'baseDuty',
+            label:
+              '按中心要求完成配电网网架规划、成资本项目储备、评审、上报、网架问题治理、配电台区超重载、配变越限治理、10千伏线路线损指标管控、配电自动化布点、自动化设备消缺、三大类缺陷（树线、绝缘裸露点、局放异常）消缺、发电作业、停电计划上报、数据质量治理等本职工作',
+            options: [
+              { value: 'yes', label: '满足（已按要求完成上述本职工作）', score: 20 },
+              { value: 'no', label: '不满足（未全部完成）', score: 0 },
+            ],
+          },
+        ],
+      },
+      {
+        title: '第二部分 · 提质赋分',
+        hint: '依据：市公司发布的月度经营简报、二中心业务管控周报',
+        items: [
+          {
+            key: 'q1',
+            label:
+              '攻克技术难题、优化技术方案、压降设备故障、供电可靠性提升、代维驻点建设等专业管理经验被上级公司肯定或推广',
+            options: yesNoOptions(5),
+          },
+          {
+            key: 'q2',
+            label: '牵头完成中心布置的急难险重专项任务',
+            options: yesNoOptions(5),
+          },
+          {
+            key: 'q3',
+            label: '牵头制定中心各项内控制度、管理办法、实施方案等',
+            options: yesNoOptions(5),
+          },
+          {
+            key: 'q4',
+            label: '负责的专业领域指标在主城区四个中心排名',
+            options: [
+              { value: 'rank1', label: '排名第一', score: 10 },
+              { value: 'rank2', label: '排名第二', score: 8 },
+              { value: 'rank3', label: '排名第三', score: 0 },
+              { value: 'rank4', label: '排名第四', score: 0 },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+};
+
+// 取某岗位的专属表单定义（未配置返回 null，页面回落到通用表单）
+export const getPositionForm = (position) => POSITION_FORMS[position] || null;
+
+// 按答卷（{ 题key: 选项value }）计算总分
+export const calcFormTotal = (formDef, answers = {}) => {
+  let total = 0;
+  formDef?.sections?.forEach((sec) =>
+    sec.items.forEach((it) => {
+      const opt = it.options.find((o) => o.value === answers[it.key]);
+      total += opt?.score || 0;
+    })
+  );
+  return total;
+};
+
+// 满分不一定是 100，等级按得分比例换算（90%/75%/60%）
+export const calcFormGrade = (total, fullScore = 100) => {
+  const pct = fullScore ? (total / fullScore) * 100 : 0;
+  if (pct >= 90) return '优秀';
+  if (pct >= 75) return '良好';
+  if (pct >= 60) return '合格';
+  return '不合格';
+};
+
+// ============================================================
 // 管理员注册密钥
 // ------------------------------------------------------------
-// 【要改就改这里】只有输入正确的密钥，才能注册成「管理员」。
-// 要求：8 位，数字 + 字母（大小写均可）组合。
-// 建议避开易混字符：0 / O、1 / l / I
+// 密钥已移到后端校验，见 server/server.js 的 ADMIN_INVITE_CODES
+// （两个党支部各一把，互不通用）。
+// 原因：前端源码会被打包发给每个访客（F12 即可搜到），放在这里等于公开。
+// 前端现在只负责收集密钥、原样提交给后端，由后端决定是否通过。
+// 密钥要求：8 位，数字 + 字母组合（建议避开易混字符 0/O、1/l/I）。
 // ============================================================
-export const ADMIN_INVITE_CODE = 'K9mQ4xZ7';

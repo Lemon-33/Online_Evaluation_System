@@ -10,7 +10,6 @@
     "preview": "vite preview --host"
   },
   "dependencies": {
-    "@cloudbase/js-sdk": "^2.0.0",
     "antd": "^5.17.0",
     "dayjs": "^1.11.11",
     "react": "^18.3.1",

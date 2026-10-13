@@ -6,6 +6,7 @@ import Register from './pages/Register';
 import SelfEvaluation from './pages/SelfEvaluation';
 import Review from './pages/Review';
 import EvaluationList from './pages/EvaluationList';
+import Profile from './pages/Profile';
 import { useAuth } from './context/AuthContext';
 import { ROLES } from './lib/constants';
 
@@ -88,6 +89,8 @@ export default function App({ mockMode }) {
               </RequireRole>
             }
           />
+          {/* 个人信息：登录即可查看，与角色无关 */}
+          <Route path="/profile" element={<Profile />} />
           <Route path="/" element={<RootRedirect />} />
           <Route path="*" element={<RootRedirect />} />
         </Route>
