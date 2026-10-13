@@ -24,28 +24,27 @@ export function AuthProvider({ children }) {
   }, [user]);
 
   // ---------- 注册（写入 SQLite） ----------
+  // 用户在注册页选 role（员工/管理员）→ 后端按 role + work_id 共同校验
+  // 员工字段（position/positionType）仅在 role='employee' 时由前端传；
+  // role='admin' 时不传岗位字段。
   const register = async ({
     username,
     password,
     name: realName,
+    workId,
     role,
     position,
     positionType,
     branch,
-    adminCode,
   }) => {
-    if (!username || !password || !realName || !role) {
+    if (!username || !password || !realName || !workId || !role) {
       throw new Error('请填写完整的注册信息');
-    }
-    if (role === ROLES.EMPLOYEE && (!position || !positionType)) {
-      throw new Error('员工必须选择岗位类型和所在岗位');
-    }
-    // 前端只校验"填了没"，密钥正确与否由后端判定（前端源码会打包公开，不能存密钥）
-    if (role === ROLES.ADMIN && !adminCode) {
-      throw new Error('请输入管理员密钥');
     }
     if (!branch) {
       throw new Error('必须选择所在党支部');
+    }
+    if (role === ROLES.EMPLOYEE && (!position || !positionType)) {
+      throw new Error('员工必须选择岗位类型和所在岗位');
     }
 
     let res;
@@ -54,23 +53,31 @@ export function AuthProvider({ children }) {
         username,
         password,
         name: realName,
+        workId,
         role,
         position,
         positionType,
         branch,
-        adminCode,
       });
     } catch (e) {
       throw new Error(e.message || '网络异常，注册失败，请稍后重试');
     }
 
-    // 后端判定：管理员密钥不正确
-    if (res.code === 'BAD_ADMIN_CODE') {
-      throw new Error('管理员密钥不正确');
+    // 后端校验错误码
+    if (res.code === 'WORK_ID_NOT_IN_LIST') {
+      throw new Error(res.message || '工作证编号异常，请重新输入');
     }
-    // 数据库已存在同名 user_id
+    if (res.code === 'WORK_ID_NOT_ADMIN') {
+      throw new Error(res.message || '该工作证编号不是管理员编号，无法注册为管理员');
+    }
+    if (res.code === 'WORK_ID_IS_ADMIN') {
+      throw new Error(res.message || '该工作证编号属于管理员，请用管理员身份注册');
+    }
     if (res.code === 'USER_EXISTS') {
       throw new Error('用户名已经存在，请选择一个新的用户名');
+    }
+    if (res.code === 'DUP_WORK_ID') {
+      throw new Error(res.message || '当前工号员工已经注册');
     }
     if (res.code !== 'OK' || !res.user) {
       throw new Error(res.message || '注册失败，请稍后重试');

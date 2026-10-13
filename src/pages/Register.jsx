@@ -8,7 +8,6 @@ import {
   message,
   Typography,
   Card,
-  Alert,
 } from 'antd';
 import { UserAddOutlined } from '@ant-design/icons';
 import { useNavigate, Link } from 'react-router-dom';
@@ -19,7 +18,6 @@ import {
   getPositionsByType,
 } from '../lib/constants';
 import { useAuth } from '../context/AuthContext';
-import { isMockMode } from '../lib/cloudbase';
 
 const { Title, Text } = Typography;
 
@@ -31,7 +29,6 @@ export default function Register() {
 
   const role = Form.useWatch('role', form);
   const positionType = Form.useWatch('positionType', form);
-  // 当前岗位类型下的岗位选项
   const positionOptions = getPositionsByType(positionType);
 
   // 岗位类型变化时清空已选岗位，避免类型与岗位不匹配
@@ -64,17 +61,6 @@ export default function Register() {
           <Text type="secondary">完成注册后即可登录评价系统</Text>
         </div>
 
-        <Alert
-          showIcon
-          type="info"
-          message={
-            isMockMode()
-              ? '本地调试模式：默认管理员 admin / admin123；注册「管理员」身份需填写管理员密钥'
-              : '注册「管理员」身份需要填写管理员密钥'
-          }
-          style={{ marginBottom: 16, fontSize: 12 }}
-        />
-
         <Form
           form={form}
           layout="vertical"
@@ -98,7 +84,7 @@ export default function Register() {
               { pattern: /^[a-zA-Z0-9_]+$/, message: '仅允许字母、数字、下划线' },
             ]}
           >
-            <Input placeholder="登录账号（3-20 位字母/数字/下划线）" />
+            <Input placeholder="登录账号（6-20 位数字字母）" />
           </Form.Item>
 
           <Form.Item
@@ -142,7 +128,26 @@ export default function Register() {
             <Input placeholder="例如：张三" />
           </Form.Item>
 
-          {/* 员工分支：岗位类型（先选）→ 所在岗位（随类型联动）→ 所在党支部 */}
+          <Form.Item
+            label="工作证编号"
+            name="workId"
+            rules={[
+              { required: true, message: '请输入工作证编号' },
+              { min: 2, message: '工作证编号至少 2 位' },
+            ]}
+          >
+            <Input maxLength={32} />
+          </Form.Item>
+
+          <Form.Item
+            label="所在党支部"
+            name="branch"
+            rules={[{ required: true, message: '请选择所在党支部' }]}
+          >
+            <Select placeholder="请选择所在党支部" options={BRANCHES} />
+          </Form.Item>
+
+          {/* 员工专属字段：仅当选择「员工（党员）」身份时显示 */}
           {role === ROLES.EMPLOYEE && (
             <>
               <Form.Item
@@ -168,48 +173,6 @@ export default function Register() {
                   disabled={!positionType}
                   allowClear
                   notFoundContent="请先选择岗位类型"
-                />
-              </Form.Item>
-              <Form.Item
-                label="所在党支部"
-                name="branch"
-                rules={[{ required: true, message: '请选择所在党支部' }]}
-              >
-                <Select placeholder="请选择所在党支部" options={BRANCHES} />
-              </Form.Item>
-            </>
-          )}
-
-          {/* 管理员分支：所在党支部 + 管理员密钥 */}
-          {role === ROLES.ADMIN && (
-            <>
-              <Form.Item
-                label="所在党支部"
-                name="branch"
-                rules={[{ required: true, message: '请选择所在党支部' }]}
-              >
-                <Select placeholder="请选择所在党支部" options={BRANCHES} />
-              </Form.Item>
-
-              <Form.Item
-                label="管理员密钥"
-                name="adminCode"
-                rules={[
-                  { required: true, message: '请输入管理员密钥' },
-                  {
-                    // 只校验格式，密钥是否正确由后端判定（前端不保存密钥）
-                    validator: (_, value) =>
-                      !value || /^[A-Za-z0-9]{8}$/.test(value)
-                        ? Promise.resolve()
-                        : Promise.reject(new Error('密钥为 8 位字母或数字')),
-                  },
-                ]}
-                extra="两个党支部密钥不同，请向所在支部管理员获取"
-              >
-                <Input
-                  placeholder="请输入 8 位管理员密钥"
-                  maxLength={8}
-                  autoComplete="off"
                 />
               </Form.Item>
             </>

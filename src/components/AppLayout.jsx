@@ -8,7 +8,15 @@ import {
 } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { ROLES, ROLE_META, findLabel, POSITION_TYPES, BRANCHES, findPositionLabel } from '../lib/constants';
+import {
+  ROLES,
+  ROLE_META,
+  ADMIN_TYPE_META,
+  findLabel,
+  POSITION_TYPES,
+  BRANCHES,
+  findPositionLabel,
+} from '../lib/constants';
 
 const { Header, Sider, Content } = Layout;
 
@@ -21,7 +29,7 @@ export default function AppLayout() {
     can('self') && {
       key: '/self',
       icon: <EditOutlined />,
-      label: '党员自评',
+      label: '每月履职贡献自评',
     },
     can('review') && {
       key: '/review',
@@ -128,6 +136,11 @@ export default function AppLayout() {
               <Avatar icon={<UserOutlined />} style={{ background: '#fff', color: '#b71c1c' }} />
               <span>{user?.name || '匿名'}</span>
               <Tag color={meta.color}>{meta.text}</Tag>
+              {user?.role === ROLES.ADMIN && ADMIN_TYPE_META[user?.adminType] && (
+                <Tag color={ADMIN_TYPE_META[user.adminType].color}>
+                  {ADMIN_TYPE_META[user.adminType].text}
+                </Tag>
+              )}
               {subInfo && <span style={{ fontSize: 12, opacity: 0.85 }}>· {subInfo}</span>}
             </Space>
           </Dropdown>

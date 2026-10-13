@@ -27,6 +27,19 @@ export const ROLES = {
   ADMIN: 'admin',
 };
 
+// ===== 管理员类型 =====
+// 仅当 user.role === ROLES.ADMIN 时 adminType 才有意义
+//   0 = 分管领导
+//   1 = 组织委员
+// 取自 user_table.admin_type 字段（与 server/admin-whitelist.mjs 对齐）
+export const ADMIN_TYPE_LEADER = 0;
+export const ADMIN_TYPE_ORGANIZER = 1;
+
+export const ADMIN_TYPE_META = {
+  [ADMIN_TYPE_LEADER]:    { text: '分管领导', color: 'gold' },
+  [ADMIN_TYPE_ORGANIZER]: { text: '组织委员', color: 'purple' },
+};
+
 export const ROLE_META = {
   [ROLES.EMPLOYEE]: { text: '员工（党员）', color: 'blue' },
   [ROLES.ADMIN]: { text: '管理员（支部）', color: 'red' },
@@ -110,91 +123,40 @@ const yesNoOptions = (score) => [
   { value: 'no', label: '否', score: 0 },
 ];
 
-export const POSITION_FORMS = {
-  distributionTech: {
-    label: '配网专业技术岗',
-    fullScore: 45,
-    sections: [
-      {
-        title: '第一部分 · 基础履职',
-        items: [
-          {
-            key: 'baseDuty',
-            label:
-              '按中心要求完成配电网网架规划、成资本项目储备、评审、上报、网架问题治理、配电台区超重载、配变越限治理、10千伏线路线损指标管控、配电自动化布点、自动化设备消缺、三大类缺陷（树线、绝缘裸露点、局放异常）消缺、发电作业、停电计划上报、数据质量治理等本职工作',
-            options: [
-              { value: 'yes', label: '满足（已按要求完成上述本职工作）', score: 20 },
-              { value: 'no', label: '不满足（未全部完成）', score: 0 },
-            ],
-          },
-        ],
-      },
-      {
-        title: '第二部分 · 提质赋分',
-        hint: '依据：市公司发布的月度经营简报、二中心业务管控周报',
-        items: [
-          {
-            key: 'q1',
-            label:
-              '攻克技术难题、优化技术方案、压降设备故障、供电可靠性提升、代维驻点建设等专业管理经验被上级公司肯定或推广',
-            options: yesNoOptions(5),
-          },
-          {
-            key: 'q2',
-            label: '牵头完成中心布置的急难险重专项任务',
-            options: yesNoOptions(5),
-          },
-          {
-            key: 'q3',
-            label: '牵头制定中心各项内控制度、管理办法、实施方案等',
-            options: yesNoOptions(5),
-          },
-          {
-            key: 'q4',
-            label: '负责的专业领域指标在主城区四个中心排名',
-            options: [
-              { value: 'rank1', label: '排名第一', score: 10 },
-              { value: 'rank2', label: '排名第二', score: 8 },
-              { value: 'rank3', label: '排名第三', score: 0 },
-              { value: 'rank4', label: '排名第四', score: 0 },
-            ],
-          },
-        ],
-      },
-    ],
-  },
-};
+// 岗位表单定义从 src/lib/forms-data.mjs 导入（单一真源）
+// 数据更新：编辑 src/lib/forms-data.mjs 后，前端会自动用上新数据，无需改这里
+import * as _formsData from './forms-data.mjs';
+export const POSITION_FORMS = _formsData.POSITION_FORMS;
 
 // 取某岗位的专属表单定义（未配置返回 null，页面回落到通用表单）
 export const getPositionForm = (position) => POSITION_FORMS[position] || null;
 
-// 按答卷（{ 题key: 选项value }）计算总分
+// 按答卷计算总分
+//   选择题：answers[it.key] = 选项 value   → 取 options[].score
+//   填空题：answers[it.key] = 数量        → 数量 × unitScore
 export const calcFormTotal = (formDef, answers = {}) => {
   let total = 0;
   formDef?.sections?.forEach((sec) =>
     sec.items.forEach((it) => {
-      const opt = it.options.find((o) => o.value === answers[it.key]);
-      total += opt?.score || 0;
+      if (it.type === 'fill') {
+        const count = Number(answers[it.key]) || 0;
+        total += count * (it.unitScore || 0);
+      } else {
+        const opt = it.options?.find((o) => o.value === answers[it.key]);
+        total += opt?.score || 0;
+      }
     })
   );
   return total;
 };
 
-// 满分不一定是 100，等级按得分比例换算（90%/75%/60%）
-export const calcFormGrade = (total, fullScore = 100) => {
-  const pct = fullScore ? (total / fullScore) * 100 : 0;
-  if (pct >= 90) return '优秀';
-  if (pct >= 75) return '良好';
-  if (pct >= 60) return '合格';
-  return '不合格';
-};
-
 // ============================================================
-// 管理员注册密钥
+// 管理员注册密钥 —— 已停用
 // ------------------------------------------------------------
-// 密钥已移到后端校验，见 server/server.js 的 ADMIN_INVITE_CODES
-// （两个党支部各一把，互不通用）。
-// 原因：前端源码会被打包发给每个访客（F12 即可搜到），放在这里等于公开。
-// 前端现在只负责收集密钥、原样提交给后端，由后端决定是否通过。
-// 密钥要求：8 位，数字 + 字母组合（建议避开易混字符 0/O、1/l/I）。
+// 改用「工作证编号白名单」方案（白名单仅存于后端，见 server/admin-whitelist.mjs）：
+//   - 名单内 4 个工作证编号自动注册为管理员（W-0001/0002=分管领导, W-0003/0004=组织委员）
+//   - 名单内 46 个工作证编号自动注册为普通党员（W-0005~W-0050）
+//   - 名单外的编号拒绝注册：后端返回 WORK_ID_NOT_IN_LIST
+// 前端不做白名单校验，提交时由后端判定。
+// 重新启用密钥方案时，参见 server/server.js 顶部注释。
 // ============================================================

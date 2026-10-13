@@ -16,7 +16,9 @@ const DEFAULT_MOCK_USERS = [
     id: 'mock-admin-default',
     user_id: 'admin',
     pw: 'admin123',
+    work_id: 'W-0001',
     admin: true,
+    admin_type: 0,
     name: '默认管理员',
     type: null,
     job: null,
@@ -48,6 +50,10 @@ const mockRegister = (payload) => {
   if (list.some((u) => u.user_id === payload.user_id)) {
     return { code: 'USER_EXISTS', message: '用户名已经存在，请选择一个新的用户名' };
   }
+  // 工作证编号 work_id 全局唯一
+  if (payload.work_id && list.some((u) => u.work_id === payload.work_id)) {
+    return { code: 'DUP_WORK_ID', message: '当前工号员工已经注册' };
+  }
   const row = {
     id: `mock-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
     ...payload,
@@ -76,7 +82,9 @@ export function mapUserFromDb(row) {
     id: row.id,
     username: row.user_id,
     name: row.name,
+    workId: row.work_id || '',
     role: isAdmin ? ROLES.ADMIN : ROLES.EMPLOYEE,
+    adminType: (row.admin_type === 1 || row.admin_type === '1') ? 1 : 0, // 0=分管领导, 1=组织委员
     position: row.job || '',
     positionType: row.type || '',
     branch: row.branch || '',
@@ -85,31 +93,36 @@ export function mapUserFromDb(row) {
 }
 
 // 前端注册表单 → 数据库列
-export function toDbPayload({ username, password, name, role, position, positionType, branch, adminCode }) {
-  const isAdmin = role === ROLES.ADMIN;
+// 注意：admin / admin_type 由后端按 role + work_id 共同决定后写入
+export function toDbPayload({ username, password, name, workId, role, position, positionType, branch }) {
   return {
     user_id: username,
     pw: password,
     name,
-    // admin 只表达"我想注册成管理员"的意图，是否通过由后端按 adminCode 判定
-    admin: isAdmin,
-    adminCode: isAdmin ? adminCode : undefined,
-    // 管理员不写岗位信息
-    type: isAdmin ? null : positionType,
-    job: isAdmin ? null : position,
+    work_id: workId,
+    role, // 'employee' | 'admin' — 后端校验 work_id 与 role 的一致性
+    type: positionType,
+    job: position,
     branch,
   };
 }
 
 // ---------- 对外接口：注册 ----------
+// 前端把用户选的 role 传给后端；后端按 work_id 查白名单，并校验
+//   - role='admin' 要求 work_id 在白名单前 4
+//   - role='employee' 要求 work_id 在白名单非前 4
+// 不在前端做预校验。
 export async function registerUser(values) {
   const payload = toDbPayload(values);
 
   if (isMockMode()) {
-    // mock 是纯本地调试模式，没有后端可校验密钥，因此不校验；
-    // 密钥也不能存在前端，否则等于公开。真实注册一律走下面的 /api/register。
-    const { adminCode, ...safe } = payload;
-    const res = mockRegister(safe);
+    // mock 模式无后端校验，按用户选的 role 写入
+    const row = {
+      ...payload,
+      admin: payload.role === ROLES.ADMIN ? 1 : 0,
+      admin_type: 0,
+    };
+    const res = mockRegister(row);
     return { ...res, user: mapUserFromDb(res.user) };
   }
 

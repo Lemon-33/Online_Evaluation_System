@@ -27,7 +27,6 @@ import {
 import {
   SCORE_DIMENSIONS,
   calcGrade,
-  calcFormGrade,
   getPositionForm,
   POSITION_TYPES,
   findLabel,
@@ -103,9 +102,8 @@ export default function Review() {
     }
   };
 
-  // 当前审核记录若属于已配置专属表单的岗位，按该岗位满分展示与评分
+  // 当前审核记录若属于已配置专属表单的岗位
   const activeFormDef = active ? getPositionForm(active.position) : null;
-  const activeFull = activeFormDef?.fullScore || 100;
 
   const columns = [
     { title: '姓名', dataIndex: 'name', width: 100 },
@@ -130,16 +128,8 @@ export default function Review() {
     {
       title: '自评总分',
       dataIndex: 'selfTotal',
-      width: 110,
-      render: (v, r) => {
-        const full = getPositionForm(r.position)?.fullScore || 100;
-        const pct = full ? (v / full) * 100 : 0;
-        return (
-          <Tag color={pct >= 75 ? 'blue' : pct >= 60 ? 'gold' : 'red'}>
-            {v} / {full}
-          </Tag>
-        );
-      },
+      width: 90,
+      render: (v) => <Tag color="blue">{v}</Tag>,
     },
     {
       title: '提交时间',
@@ -350,7 +340,7 @@ export default function Review() {
                   })}
                 <div style={{ marginTop: 12 }}>
                   <Tag color="blue" style={{ fontSize: 14, padding: '2px 10px' }}>
-                    自评总分 {active.selfTotal} / {activeFull}
+                    自评总分 {active.selfTotal}
                   </Tag>
                 </div>
               </div>
@@ -371,17 +361,16 @@ export default function Review() {
             <Form form={form} layout="vertical">
               <Form.Item
                 name="reviewScore"
-                label={`审核总分（0-${activeFull}）`}
+                label="审核总分"
                 rules={[
                   { required: true, message: '请填写审核分' },
-                  { type: 'number', min: 0, max: activeFull },
+                  { type: 'number', min: 0, max: 100 },
                 ]}
               >
                 <InputNumber
                   min={0}
-                  max={activeFull}
+                  max={100}
                   style={{ width: 200 }}
-                  addonAfter={` / ${activeFull}`}
                 />
               </Form.Item>
               <Form.Item
@@ -393,14 +382,12 @@ export default function Review() {
               </Form.Item>
             </Form>
 
-            <Statistic
-              title="当前等级（按审核分）"
-              value={
-                activeFormDef
-                  ? calcFormGrade(form.getFieldValue('reviewScore') || 0, activeFull)
-                  : calcGrade(form.getFieldValue('reviewScore') || 0)
-              }
-            />
+            {!activeFormDef && (
+              <Statistic
+                title="当前等级（按审核分）"
+                value={calcGrade(form.getFieldValue('reviewScore') || 0)}
+              />
+            )}
           </>
         )}
       </Drawer>

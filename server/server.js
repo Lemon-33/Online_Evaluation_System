@@ -4,6 +4,7 @@ import compression from 'compression';
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { lookupWorkId } from './admin-whitelist.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -22,12 +23,16 @@ db.exec(`
     user_id TEXT PRIMARY KEY,
     pw TEXT NOT NULL,
     name TEXT NOT NULL,
+    work_id TEXT NOT NULL,
     admin INTEGER DEFAULT 0,
+    -- admin_type: 0=分管领导, 1=组织委员, 默认 0（与 admin=0 配套才表示普通党员）
+    admin_type INTEGER DEFAULT 0,
     type TEXT,
     job TEXT,
     branch TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now','localtime'))
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_user_table_work_id ON user_table(work_id) WHERE work_id IS NOT NULL;
   CREATE TABLE IF NOT EXISTS evaluation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -50,22 +55,33 @@ db.exec(`
   );
 `);
 
+// 老库升级：补加 admin_type 列（SQLite 没有 IF NOT EXISTS for columns，
+// 靠 try/catch 兜底：列已存在会抛错，吞掉即可）
+try {
+  db.exec('ALTER TABLE user_table ADD COLUMN admin_type INTEGER DEFAULT 0');
+} catch (_) {
+  // 列已存在，忽略
+}
+
 const toBool = (v) => (v === true || v === 1 || v === '1' || v === 'true' ? 1 : 0);
 
 // ============================================================
-// 管理员注册密钥（按党支部分开，一个支部一把）
+// 管理员注册密钥（按党支部分开，一个支部一把）—— 已停用
 // ------------------------------------------------------------
-// 【要改就改这里】只有「支部 + 密钥」同时对上，才能注册成该支部的管理员。
-// 两个支部密钥不同：拿错支部的密钥注册，会被直接拒绝，
-// 从而避免"人在第二支部、却注册成了第一支部管理员"这类错位。
-// 格式要求：8 位，数字 + 字母组合（建议避开易混字符 0/O、1/l/I）
-// 为什么不放前端：前端源码会打包发给每一个访客，F12 就能搜到，
-// 写在前端等于公开。只有在这里比对，外部才无法用 HTTP 请求绕过。
+// 停用原因：改用「工作证编号白名单」方案，由 server/admin-whitelist.mjs 控制。
+// 重新启用步骤：
+//   1. 取消下面块注释（恢复 ADMIN_INVITE_CODES 常量）
+//   2. 在 /api/register 里恢复「adminCode 校验」那段 if 逻辑
+//   3. 在 src/lib/userService.js / Register.jsx / AuthContext.jsx
+//      里同步恢复 adminCode 相关代码
+//   4. 重新打包 + 部署
 // ============================================================
+/*
 const ADMIN_INVITE_CODES = {
   first: 'K9mQ4xZ7',   // 第一党支部
   second: 'rT7vN2hK',  // 第二党支部
 };
+*/
 
 app.get('/api/ping', (_req, res) => res.json({ code: 'OK', hasApiKey: true, message: '服务正常' }));
 app.get('/api/gateway', (_req, res) => {
@@ -73,32 +89,53 @@ app.get('/api/gateway', (_req, res) => {
   catch (e) { res.json({ code: 'DB_ERROR', message: e.message }); }
 });
 app.post('/api/register', (req, res) => {
-  const { user_id, pw, name, type, job, branch, admin, adminCode } = req.body || {};
-  if (!user_id || !pw || !name || !branch)
-    return res.json({ code: 'BAD_INPUT', message: '缺少必填字段（user_id/pw/name/branch）' });
+  const { user_id, pw, name, work_id, role, type, job, branch } = req.body || {};
+  if (!user_id || !pw || !name || !work_id || !role || !branch)
+    return res.json({ code: 'BAD_INPUT', message: '缺少必填字段（user_id/pw/name/work_id/role/branch）' });
 
-  // 是否管理员：必须"所选支部的密钥"对得上，且不信任前端传来的 admin 字段
-  const isAdmin = !!adminCode && ADMIN_INVITE_CODES[branch] === adminCode ? 1 : 0;
-  // 前端声明要注册管理员、但密钥不对（或与所选支部不匹配）→ 明确拒绝
-  if (toBool(admin) && !isAdmin)
-    return res.json({ code: 'BAD_ADMIN_CODE', message: '管理员密钥不正确，或与所选党支部不匹配' });
+  // 工作证编号必须在白名单内（不区分大小写）
+  const wl = lookupWorkId(work_id);
+  if (!wl) {
+    return res.json({ code: 'WORK_ID_NOT_IN_LIST', message: '工作证编号异常，请重新输入' });
+  }
+
+  // 角色一致性校验：用户选的 role 必须与 work_id 在白名单里的身份匹配
+  //   role='admin'    → work_id 必须在白名单前 4（管理员编号）
+  //   role='employee' → work_id 必须在白名单其他（普通党员编号）
+  // 这样防止：
+  //   ① 有人用普通员工编号冒充管理员注册
+  //   ② 有人用管理员编号注册成员工（管理员编号是稀缺资源，应该只给管理员用）
+  const wantsAdmin = role === 'admin';
+  if (wantsAdmin && wl.kind !== 'admin') {
+    return res.json({ code: 'WORK_ID_NOT_ADMIN', message: '该工作证编号不是管理员编号，无法注册为管理员' });
+  }
+  if (!wantsAdmin && wl.kind === 'admin') {
+    return res.json({ code: 'WORK_ID_IS_ADMIN', message: '该工作证编号属于管理员，请用「管理员」身份注册' });
+  }
 
   if (db.prepare('SELECT 1 FROM user_table WHERE user_id = ?').get(user_id))
     return res.json({ code: 'USER_EXISTS', message: '该工号已被注册' });
 
-  db.prepare(`INSERT INTO user_table (user_id, pw, name, admin, type, job, branch) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+  // 工作证编号 work_id 必须全局唯一（NULL 除外）：已存在则提示"当前工号员工已经注册"
+  if (db.prepare('SELECT 1 FROM user_table WHERE work_id = ?').get(work_id))
+    return res.json({ code: 'DUP_WORK_ID', message: '当前工号员工已经注册' });
+
+  const isAdmin = wantsAdmin ? 1 : 0;
+  const adminType = wantsAdmin ? wl.adminType : 0;
+
+  db.prepare(`INSERT INTO user_table (user_id, pw, name, work_id, admin, admin_type, type, job, branch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(
-      user_id, pw, name, isAdmin,
+      user_id, pw, name, work_id, isAdmin, adminType,
       isAdmin ? null : type || null, // 管理员不写岗位信息
       isAdmin ? null : job || null,
       branch
     );
-  res.json({ code: 'OK', user: db.prepare(`SELECT user_id, name, admin, type, job, branch FROM user_table WHERE user_id = ?`).get(user_id) });
+  res.json({ code: 'OK', user: db.prepare(`SELECT user_id, name, work_id, admin, admin_type, type, job, branch FROM user_table WHERE user_id = ?`).get(user_id) });
 });
 app.post('/api/login', (req, res) => {
   const { user_id, pw } = req.body || {};
   if (!user_id || !pw) return res.json({ code: 'BAD_INPUT', message: '请输入工号和密码' });
-  const user = db.prepare(`SELECT user_id, name, admin, type, job, branch FROM user_table WHERE user_id = ? AND pw = ?`).get(user_id, pw);
+  const user = db.prepare(`SELECT user_id, name, work_id, admin, admin_type, type, job, branch FROM user_table WHERE user_id = ? AND pw = ?`).get(user_id, pw);
   if (!user) return res.json({ code: 'BAD_CREDENTIALS', message: '工号或密码错误' });
   res.json({ code: 'OK', user });
 });

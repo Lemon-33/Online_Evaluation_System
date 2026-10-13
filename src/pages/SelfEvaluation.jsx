@@ -12,7 +12,6 @@ import {
   message,
   Alert,
   Space,
-  Empty,
   Divider,
   Select,
   Radio,
@@ -32,17 +31,18 @@ import {
   calcTotal,
   calcGrade,
   calcFormTotal,
-  calcFormGrade,
   getPositionForm,
   POSITION_TYPES,
   findLabel,
   findPositionLabel,
+  ROLES,
 } from '../lib/constants';
 import { getMyEvaluation, submitSelfEvaluation, listEvaluations } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
 
 export default function SelfEvaluation() {
   const { user } = useAuth();
+  const isAdmin = user?.role === ROLES.ADMIN;
   const [form] = Form.useForm();
   const [year, setYear] = useState(dayjs().year());
   const [month, setMonth] = useState(dayjs().month() + 1);
@@ -61,14 +61,30 @@ export default function SelfEvaluation() {
 
   // 评价周期从 2026 年开始；未来年份不允许提交，因此最多到当前年
   const years = useMemo(() => {
-    const now = dayjs().year();
-    const arr = [];
-    for (let y = 2026; y <= now; y++) arr.push(y);
-    return arr.reverse(); // 最近的年份排前面
-  }, []);
+      const now = dayjs().year();
+      const arr = [];
+      for (let y = 2026; y <= now; y++) arr.push(y);
+      return arr.reverse(); // 最近的年份排前面
+    }, []);
+
+    // 填空题：无论何时进入页面都强制默认 0（选择题保留 rec 中的旧值用于回显修改）
+      const fillDefaults = (answers, fd) => {
+        if (!fd) return answers;
+        const out = { ...answers };
+        fd.sections.forEach((sec) =>
+          sec.items.forEach((it) => {
+            if (it.type === 'fill') {
+              out[it.key] = 0;
+            }
+          })
+        );
+        return out;
+      };
 
   const reload = async (y, m) => {
     if (!user?.name) return;
+    // 切换账号/月份前先把表单清空，避免上一个账号的 setFieldsValue 残留
+    form.resetFields();
     // 并行取两份数据：当前月的记录 + 当年全部记录（供月历展示）
     const [rec, all] = await Promise.all([
       getMyEvaluation(user.name, y, m),
@@ -88,14 +104,14 @@ export default function SelfEvaluation() {
       form.setFieldsValue({
         partyBranch: user?.branch || rec.partyBranch || '',
         scores: rec.scores?.answers ? {} : rec.scores || {},
-        answers: rec.scores?.answers || {},
+        answers: fillDefaults(rec.scores?.answers || {}, formDef),
       });
       setScores(rec.scores?.answers ? {} : rec.scores || {});
     } else {
       form.setFieldsValue({
         partyBranch: user?.branch || '',
         scores: {},
-        answers: {},
+        answers: fillDefaults({}, formDef),
       });
       setScores({});
     }
@@ -114,7 +130,6 @@ export default function SelfEvaluation() {
   const total = formDef
     ? calcFormTotal(formDef, watchedAnswers)
     : calcTotal(watchedScores);
-  const fullScore = formDef ? formDef.fullScore : 100;
 
   const onSubmit = async () => {
     // 该月自评已通过审核 → 已锁定，不允许再提交/覆盖
@@ -130,6 +145,37 @@ export default function SelfEvaluation() {
         );
         return;
       }
+
+      // ---- 主动校验（不依赖 antd 的隐式 required，绕开 Radio.Group 偶发漏检） ----
+      // 兼容性更好：先用 form.getFieldValue 拿到当前 answers，自己遍历 formDef 校验每一题
+      const answers = form.getFieldValue('answers') || {};
+      const missing = [];
+      if (formDef) {
+        for (const sec of formDef.sections) {
+          if (!isAdmin && sec.title === '履职扣分') continue; // 员工无扣分题
+          for (const it of sec.items) {
+            const v = answers[it.key];
+            const empty =
+              v === undefined ||
+              v === null ||
+              v === '' ||
+              (it.type === 'fill' && !Number.isFinite(Number(v)));
+            if (empty) missing.push(`「${sec.title}」${it.label}`);
+          }
+        }
+      } else {
+        const scores = form.getFieldValue('scores') || {};
+        for (const dim of SCORE_DIMENSIONS) {
+          if (scores[dim.key] === undefined || scores[dim.key] === null || scores[dim.key] === '') {
+            missing.push(`「${dim.label}」`);
+          }
+        }
+      }
+      if (missing.length > 0) {
+        message.warning(`还有 ${missing.length} 道题未填写：${missing.join('；')}`);
+        return; // 不调用 validateFields 也不提交
+      }
+
       const values = await form.validateFields();
       setSubmitting(true);
       const payload = {
@@ -156,10 +202,24 @@ export default function SelfEvaluation() {
       reload(year, month);
     } catch (e) {
       if (e?.errorFields) {
-        message.warning('请检查表单填写是否完整');
+        // antd 校验兜底（理论上主动校验后不会到这里，留作双保险）
+        const labels = e.errorFields
+          .map((f) => {
+            const key = Array.isArray(f.name) ? f.name[f.name.length - 1] : f.name;
+            if (formDef) {
+              for (const sec of formDef.sections) {
+                const it = sec.items.find((i) => i.key === key);
+                if (it) return `「${sec.title}」${it.label}`;
+              }
+            }
+            const dim = SCORE_DIMENSIONS.find((d) => d.key === key);
+            if (dim) return `「${dim.label}」`;
+            return key;
+          })
+          .filter(Boolean);
+        message.warning(`还有 ${labels.length} 道题未填写：${labels.join('；')}`);
       } else {
         console.error(e);
-        // 后端返回的“已审核不能覆盖”等原因直接展示给用户
         message.error(e?.message || '提交失败，请稍后再试');
       }
     } finally {
@@ -170,7 +230,6 @@ export default function SelfEvaluation() {
   const locked = existing?.reviewStatus === 'reviewed';
   const reviewed = existing?.reviewStatus === 'reviewed';
   const pending = !!existing && !reviewed;
-  const empty = loaded && !existing;
 
   return (
     <div>
@@ -211,25 +270,6 @@ export default function SelfEvaluation() {
         {pending && <Tag color="orange" icon={<ExclamationCircleOutlined />}>待审核</Tag>}
       </Space>
 
-      {/* 完全空状态：引导员工首次提交 */}
-      {empty && (
-        <Card style={{ textAlign: 'center', padding: '24px 0' }}>
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description={
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>
-                  您在 {year} 年 {month} 月还没有自评记录
-                </div>
-                <div className="muted" style={{ marginTop: 6 }}>
-                  请在下方填写本年度党员自评，并点击「提交自评」
-                </div>
-              </div>
-            }
-          />
-        </Card>
-      )}
-
       {/* 锁定提示 */}
       {locked && (
         <Alert
@@ -242,22 +282,20 @@ export default function SelfEvaluation() {
         />
       )}
 
-      <Form form={form} layout="vertical" disabled={locked}>
+      <Form form={form} layout="vertical" disabled={locked} key={user?.name || 'guest'}>
         <Row gutter={16}>
           <Col span={16}>
             {/* 基本信息已移至「个人信息」页（点击顶栏右上角姓名进入） */}
             {formDef ? (
               // 岗位专属表单：选择题模式，选项后直接标注分值
-              formDef.sections.map((sec) => (
+              // 非管理员不显示「履职扣分」段（扣分由管理员在审核页录入）
+              formDef.sections
+                .filter((sec) => isAdmin || sec.title !== '履职扣分')
+                .map((sec) => (
                 <Card
                   key={sec.title}
                   title={sec.title}
                   style={{ marginTop: 16 }}
-                  extra={
-                    sec.hint ? (
-                      <span className="muted" style={{ fontSize: 12 }}>{sec.hint}</span>
-                    ) : undefined
-                  }
                 >
                   {sec.items.map((it, idx) => (
                     <div
@@ -266,25 +304,69 @@ export default function SelfEvaluation() {
                     >
                       <div style={{ fontWeight: 600, marginBottom: 8 }}>
                         {idx + 1}. {it.label}
+                        {it.type === 'fill' && (
+                          <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                            （每{it.unit} {it.unitScore > 0 ? '+' : ''}{it.unitScore} 分）
+                          </span>
+                        )}
                       </div>
-                      <Form.Item
-                        name={['answers', it.key]}
-                        rules={[{ required: true, message: '请选择一个选项' }]}
-                        style={{ marginBottom: 0 }}
-                      >
-                        <Radio.Group>
-                          <Space direction="vertical">
-                            {it.options.map((o) => (
-                              <Radio key={o.value} value={o.value}>
-                                {o.label}
-                                <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
-                                  {o.score > 0 ? `+${o.score} 分` : '不加分'}
-                                </span>
-                              </Radio>
-                            ))}
-                          </Space>
-                        </Radio.Group>
-                      </Form.Item>
+                      {it.type === 'fill' ? (
+                        <Form.Item
+                          name={['answers', it.key]}
+                          rules={[
+                            { required: true, message: '请输入数量' },
+                            { type: 'number', min: 0, max: 30, message: '请输入 0-30 的整数' },
+                          ]}
+                          style={{ marginBottom: 0 }}
+                        >
+                          <InputNumber
+                            min={0}
+                            max={30}
+                            step={1}
+                            precision={0}
+                            keyboard={false}
+                            style={{ width: 240 }}
+                            placeholder="请输入数量"
+                            addonAfter={it.unit}
+                            parser={(v) => (v === '' || /^\d+$/.test(v) ? v : '')}
+                            onKeyDown={(e) => {
+                              // 允许：编辑键 + 数字 0-9；其它字母/符号一律拦截在输入之前
+                              if (e.ctrlKey || e.metaKey || e.altKey) return; // 保留复制粘贴等组合键
+                              const allowed = new Set([
+                                'Backspace', 'Delete', 'Tab', 'Enter',
+                                'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+                                'Home', 'End',
+                              ]);
+                              if (allowed.has(e.key)) return;
+                              if (/^[0-9]$/.test(e.key)) return;
+                              e.preventDefault();
+                            }}
+                            onPaste={(e) => {
+                              const text = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+                              if (!/^\d+$/.test(text)) e.preventDefault();
+                            }}
+                          />
+                        </Form.Item>
+                      ) : (
+                        <Form.Item
+                          name={['answers', it.key]}
+                          rules={[{ required: true, message: '请选择一个选项' }]}
+                          style={{ marginBottom: 0 }}
+                        >
+                          <Radio.Group>
+                            <Space direction="vertical">
+                              {it.options.map((o) => (
+                                <Radio key={o.value} value={o.value}>
+                                  {o.label}
+                                  <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                                    {o.score === 0 ? '不加分' : `${o.score > 0 ? '+' : ''}${o.score} 分`}
+                                  </span>
+                                </Radio>
+                              ))}
+                            </Space>
+                          </Radio.Group>
+                        </Form.Item>
+                      )}
                     </div>
                   ))}
                 </Card>
@@ -399,7 +481,6 @@ export default function SelfEvaluation() {
             >
               <Statistic
                 value={total}
-                suffix={` / ${fullScore}`}
                 valueStyle={{ color: '#b71c1c', fontSize: 36 }}
               />
               <Divider style={{ margin: '12px 0' }} />
@@ -436,16 +517,15 @@ export default function SelfEvaluation() {
                 <Statistic
                   title="最终审核分"
                   value={existing.reviewScore}
-                  suffix={` / ${fullScore}`}
                   valueStyle={{ color: '#3f8600', fontSize: 32 }}
                 />
-                <div style={{ marginTop: 12 }}>
-                  <Tag color="green" style={{ fontSize: 16, padding: '4px 12px' }}>
-                    {formDef
-                      ? calcFormGrade(existing.reviewScore || 0, fullScore)
-                      : calcGrade(existing.reviewScore || 0)}
-                  </Tag>
-                </div>
+                {!formDef && (
+                  <div style={{ marginTop: 12 }}>
+                    <Tag color="green" style={{ fontSize: 16, padding: '4px 12px' }}>
+                      {calcGrade(existing.reviewScore || 0)}
+                    </Tag>
+                  </div>
+                )}
                 <Divider style={{ margin: '12px 0' }} />
                 <div style={{ fontWeight: 600 }}>审核人评语：</div>
                 <div style={{ marginTop: 4, color: 'rgba(0,0,0,0.85)' }}>
@@ -463,7 +543,6 @@ export default function SelfEvaluation() {
                 <Statistic
                   title="自评总分"
                   value={existing.selfTotal}
-                  suffix={` / ${fullScore}`}
                 />
                 <div style={{ marginTop: 8 }}>
                   <Tag color="orange">等待管理员审核</Tag>

@@ -100,7 +100,7 @@ export default function Login() {
             name="username"
             rules={[{ required: true, message: '请输入账号' }]}
           >
-            <Input placeholder="登录账号" autoComplete="username" />
+            <Input placeholder="登录账号（6-20 位数字字母）" autoComplete="username" />
           </Form.Item>
           <Form.Item
             label="密码"

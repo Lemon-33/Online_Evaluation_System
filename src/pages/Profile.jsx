@@ -3,6 +3,7 @@ import { UserOutlined, IdcardOutlined } from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext';
 import {
   ROLES,
+  ADMIN_TYPE_META,
   POSITION_TYPES,
   BRANCHES,
   findLabel,
@@ -14,6 +15,10 @@ import {
 export default function Profile() {
   const { user } = useAuth();
   const isAdmin = user?.role === ROLES.ADMIN;
+  // adminType 0=分管领导, 1=组织委员（普通党员 admin=0, adminType 任意）
+  const adminTypeText = isAdmin
+    ? (ADMIN_TYPE_META[user?.adminType]?.text || '管理员')
+    : null;
 
   return (
     <div style={{ maxWidth: 720, margin: '0 auto' }}>
@@ -28,10 +33,18 @@ export default function Profile() {
         <Descriptions column={2} bordered size="middle">
           <Descriptions.Item label="姓名">{user?.name}</Descriptions.Item>
           <Descriptions.Item label="工号">{user?.username}</Descriptions.Item>
+          <Descriptions.Item label="工作证编号">{user?.workId || '-'}</Descriptions.Item>
           <Descriptions.Item label="身份">
-            <Tag color={isAdmin ? 'gold' : 'blue'}>
-              {isAdmin ? '支部管理员' : '员工（党员）'}
-            </Tag>
+            <Space size={4}>
+              <Tag color={isAdmin ? 'gold' : 'blue'}>
+                {isAdmin ? '支部管理员' : '员工（党员）'}
+              </Tag>
+              {isAdmin && adminTypeText && (
+                <Tag color={ADMIN_TYPE_META[user?.adminType]?.color || 'default'}>
+                  {adminTypeText}
+                </Tag>
+              )}
+            </Space>
           </Descriptions.Item>
           <Descriptions.Item label="所在党支部">
             {findLabel(BRANCHES, user?.branch) || '-'}
