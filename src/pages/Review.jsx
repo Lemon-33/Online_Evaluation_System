@@ -3,10 +3,6 @@ import {
   Table,
   Tag,
   Button,
-  Drawer,
-  Descriptions,
-  Form,
-  InputNumber,
   Input,
   Space,
   Select,
@@ -18,53 +14,68 @@ import {
   Card,
   Row,
   Col,
+  Modal,
 } from 'antd';
 import {
   AuditOutlined,
   BellOutlined,
   TrophyOutlined,
+  WarningOutlined,
+  EyeOutlined,
+  CopyOutlined,
 } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import {
-  SCORE_DIMENSIONS,
-  calcGrade,
-  getPositionForm,
   POSITION_TYPES,
   findLabel,
   findPositionLabel,
   findBranchLabel,
+  ADMIN_TYPE_SECRETARY,
 } from '../lib/constants';
-import { listEvaluations, reviewEvaluation } from '../lib/cloudbase';
+import { listEvaluations, getUnsubmittedCount } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
 
 export default function Review() {
   const { user } = useAuth();
   const [year, setYear] = useState(new Date().getFullYear());
-  const [month, setMonth] = useState(''); // '' = 全年，1-12 = 指定月份
+  // 进入页面默认选中「当前月份」（避免管理员打开看到空的全年列表）
+  const [month, setMonth] = useState(new Date().getMonth() + 1); // '' = 全年，1-12 = 指定月份
   const [status, setStatus] = useState('pending');
   const [keyword, setKeyword] = useState('');
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [active, setActive] = useState(null); // 当前审核的记录
-  const [form] = Form.useForm();
+  const navigate = useNavigate(); // 「审核」→ 整页审核表单 /review-form/:id
 
-  // 管理员只负责审核自己所属党支部的员工
-  const scopeBranch = user?.branch;
+  // 支部书记(2) 看全体 → 不传 branch；其余身份由后端按「审核对象」过滤（branch 参数被忽略）
+  const isSuperAdmin = user?.adminType === ADMIN_TYPE_SECRETARY;
+  const scopeBranch = isSuperAdmin ? undefined : user?.branch;
 
-  // 当前年度的待审/已审核数量（不受 status 切换影响）
+  // 范围内的待审 / 已审核 / 未提交自评人数（不受 status 切换影响）
   const [pendingCount, setPendingCount] = useState(0);
   const [reviewedCount, setReviewedCount] = useState(0);
+  const [unsubmittedCount, setUnsubmittedCount] = useState(0);
+  const [unsubList, setUnsubList] = useState([]); // 未提交名单（弹窗展示用）
+  const [unsubOpen, setUnsubOpen] = useState(false);
 
   const reload = async () => {
     setLoading(true);
     try {
-      const [data, p, r] = await Promise.all([
+      // 「未提交人数」只在选定了具体月份时才有意义；全年视图下不查、不显示
+      const needUnsubmitted = !!month;
+      const tasks = [
         listEvaluations({ year, month, status, keyword, branch: scopeBranch }),
         listEvaluations({ year, month, status: 'pending', branch: scopeBranch }),
         listEvaluations({ year, month, status: 'reviewed', branch: scopeBranch }),
-      ]);
+      ];
+      if (needUnsubmitted)
+        tasks.push(getUnsubmittedCount({ year, month, branch: scopeBranch }));
+
+      const [data, p, r, unsub] = await Promise.all(tasks);
       setList(data);
       setPendingCount(p.length);
       setReviewedCount(r.length);
+      setUnsubmittedCount(needUnsubmitted ? unsub?.unsubmitted || 0 : 0);
+      setUnsubList(needUnsubmitted ? unsub?.list || [] : []);
     } catch (e) {
       console.error(e);
       message.error('加载数据失败');
@@ -76,34 +87,32 @@ export default function Review() {
   useEffect(() => {
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, month, status]);
+  }, [year, month, status, keyword]);
 
-  const openReview = (rec) => {
-    setActive(rec);
-    form.setFieldsValue({
-      reviewScore: rec.selfTotal,
-      reviewComment: '',
-    });
-  };
+  // 统计卡片标题里的范围描述：「2026 年 9 月」或「2026 年」
+  const scopeLabel = month ? `${year} 年 ${month} 月` : `${year} 年`;
 
-  const submitReview = async () => {
+  // 点击「审核」→ 跳整页审核表单（按记录 id 定位；路由守卫 perm="review"）
+  // 表单按被审核人的岗位渲染，前两段回显员工答案，履职扣分段由审核人填写
+  const openReview = (rec) => navigate(`/review-form/${rec.id}`);
+
+  // 复制未提交名单（http 环境下 clipboard API 可能不可用 → 传统方案兜底）
+  const copyUnsubList = async () => {
+    const text = unsubList.map((u) => u.name).join('\r\n');
     try {
-      const values = await form.validateFields();
-      await reviewEvaluation(active.id, {
-        ...values,
-        reviewerName: user?.name || '审核人',
-      });
-      message.success('审核已保存');
-      setActive(null);
-      reload();
-    } catch (e) {
-      if (e?.errorFields) message.warning('请填写完整的审核信息');
-      else message.error('保存失败');
+      await navigator.clipboard.writeText(text);
+      message.success(`已复制 ${unsubList.length} 个姓名`);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) message.success(`已复制 ${unsubList.length} 个姓名`);
+      else message.warning('复制失败，请在弹窗里手动全选复制');
     }
   };
-
-  // 当前审核记录若属于已配置专属表单的岗位
-  const activeFormDef = active ? getPositionForm(active.position) : null;
 
   const columns = [
     { title: '姓名', dataIndex: 'name', width: 100 },
@@ -148,7 +157,7 @@ export default function Review() {
       width: 120,
       render: (_, rec) => (
         <Button type="link" onClick={() => openReview(rec)}>
-          {rec.reviewStatus === 'reviewed' ? '查看 / 重审' : '审核'}
+          {rec.reviewStatus === 'reviewed' ? '重新审核' : '审核'}
         </Button>
       ),
     },
@@ -158,25 +167,31 @@ export default function Review() {
     <div>
       {/* 审核模式 banner */}
       <Alert
-        type="warning"
+        type={isSuperAdmin ? 'error' : 'warning'}
         showIcon
         icon={<AuditOutlined />}
         message={
           <Space>
-            <span style={{ fontWeight: 600 }}>管理员审核模式</span>
+            <span style={{ fontWeight: 600 }}>
+              {isSuperAdmin ? '支部书记审核模式' : '管理员审核模式'}
+            </span>
             <Tag color="red">{user?.name}</Tag>
-            <Tag color="gold">
-              负责审核：{findBranchLabel(scopeBranch)}
+            <Tag color={isSuperAdmin ? 'magenta' : 'gold'}>
+              {isSuperAdmin ? '可见全支部' : `负责审核：${findBranchLabel(scopeBranch)}`}
             </Tag>
           </Space>
         }
-        description={`您负责审核「${findBranchLabel(
-          scopeBranch
-        )}」的员工自评。此处仅显示该支部员工，其他支部的数据不可见。`}
+        description={
+          isSuperAdmin
+            ? '您作为支部书记可查看所有支部的员工自评，不受支部范围限制。'
+            : `您负责审核「${findBranchLabel(
+                scopeBranch
+              )}」的员工自评。此处仅显示该支部员工，其他支部的数据不可见。`
+        }
         style={{ marginBottom: 16 }}
       />
 
-      {/* 统计卡片 */}
+      {/* 统计卡片：标题跟随所选年月范围 */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={8}>
           <Card>
@@ -184,7 +199,7 @@ export default function Review() {
               title={
                 <Space>
                   <BellOutlined />
-                  <span>{year} 年待审核</span>
+                  <span>{scopeLabel}待审核</span>
                 </Space>
               }
               value={pendingCount}
@@ -199,7 +214,7 @@ export default function Review() {
               title={
                 <Space>
                   <TrophyOutlined />
-                  <span>{year} 年已审核</span>
+                  <span>{scopeLabel}已审核</span>
                 </Space>
               }
               value={reviewedCount}
@@ -211,11 +226,35 @@ export default function Review() {
         <Col span={8}>
           <Card>
             <Statistic
-              title="当前列表"
-              value={list.length}
-              suffix="人"
-              valueStyle={{ color: '#b71c1c' }}
+              title={
+                <Space>
+                  <WarningOutlined />
+                  <span>未提交审核人数</span>
+                </Space>
+              }
+              // 全年视图下不适用，直接显示「—」
+              value={month ? unsubmittedCount : '—'}
+              suffix={month ? '人' : ''}
+              valueStyle={{
+                color: month
+                  ? unsubmittedCount > 0
+                    ? '#fa541c'
+                    : '#3f8600'
+                  : '#bfbfbf',
+              }}
             />
+            {/* 有人未提交时提供「查看」入口（小弹窗展示名单，不离开列表页） */}
+            {month && unsubmittedCount > 0 && (
+              <Button
+                type="link"
+                size="small"
+                icon={<EyeOutlined />}
+                style={{ padding: 0, marginTop: 4 }}
+                onClick={() => setUnsubOpen(true)}
+              >
+                查看
+              </Button>
+            )}
           </Card>
         </Col>
       </Row>
@@ -267,10 +306,8 @@ export default function Review() {
           placeholder="按姓名搜索"
           allowClear
           style={{ width: 220 }}
-          onSearch={(v) => {
-            setKeyword(v);
-            reload();
-          }}
+          // 只更新 keyword，由 useEffect 依赖触发重新加载
+          onSearch={(v) => setKeyword(v)}
         />
       </Space>
 
@@ -283,114 +320,51 @@ export default function Review() {
         pagination={{ pageSize: 10 }}
       />
 
-      <Drawer
-        title={active ? `审核：${active.name}（${active.year} 年度）` : '审核'}
-        open={!!active}
-        onClose={() => setActive(null)}
-        width={560}
-        footer={
-          active && (
-            <Space>
-              <Button onClick={() => setActive(null)}>取消</Button>
-              <Button type="primary" onClick={submitReview}>
-                确认提交
-              </Button>
-            </Space>
-          )
-        }
+      {/* 审核表单已独立成整页（/review-form/:id）：
+          点「审核」按记录 id 跳转，按被审核人岗位渲染完整表单，
+          前两段回显员工答案，履职扣分段由审核人填写，右侧实时算分 */}
+
+      {/* 未提交名单弹窗：一行一个姓名，可鼠标全选复制，也可一键复制 */}
+      <Modal
+        open={unsubOpen}
+        onCancel={() => setUnsubOpen(false)}
+        title={`${scopeLabel}未提交名单（${unsubList.length} 人）`}
+        width={420}
+        footer={[
+          <Button
+            key="copy"
+            type="primary"
+            icon={<CopyOutlined />}
+            onClick={copyUnsubList}
+          >
+            复制全部
+          </Button>,
+        ]}
       >
-        {active && (
-          <>
-            <Descriptions size="small" column={2} bordered>
-              <Descriptions.Item label="姓名">{active.name}</Descriptions.Item>
-              <Descriptions.Item label="岗位 / 类型">
-                {findPositionLabel(active.position)} / {findLabel(POSITION_TYPES, active.positionType)}
-              </Descriptions.Item>
-              <Descriptions.Item label="党支部">{findBranchLabel(active.partyBranch)}</Descriptions.Item>
-              <Descriptions.Item label="年度">{active.year}</Descriptions.Item>
-              <Descriptions.Item label="提交时间" span={2}>{active.createdAt}</Descriptions.Item>
-            </Descriptions>
-
-            <div className="section-title">党员自评分项</div>
-            {active.scores?.answers && activeFormDef ? (
-              // 岗位专属表单：逐题展示所选选项与该项得分
-              <div>
-                {activeFormDef.sections
-                  .flatMap((s) => s.items)
-                  .map((it, i) => {
-                    const chosen = active.scores.answers[it.key];
-                    const opt = it.options.find((o) => o.value === chosen);
-                    return (
-                      <div key={it.key} style={{ padding: '8px 0', borderBottom: '1px solid #f0f0f0' }}>
-                        <div style={{ fontWeight: 600, fontSize: 13 }}>
-                          {i + 1}. {it.label}
-                        </div>
-                        <div style={{ marginTop: 4 }}>
-                          {opt ? (
-                            <Space wrap>
-                              <Tag color={opt.score > 0 ? 'green' : 'default'}>{opt.label}</Tag>
-                              <Tag color="blue">得 {opt.score} 分</Tag>
-                            </Space>
-                          ) : (
-                            <span className="muted">未作答</span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                <div style={{ marginTop: 12 }}>
-                  <Tag color="blue" style={{ fontSize: 14, padding: '2px 10px' }}>
-                    自评总分 {active.selfTotal}
-                  </Tag>
-                </div>
-              </div>
-            ) : (
-              <Descriptions size="small" column={1} bordered>
-                {SCORE_DIMENSIONS.map((d) => (
-                  <Descriptions.Item key={d.key} label={`${d.label}（满分 ${d.max}）`}>
-                    {active.scores?.[d.key] ?? 0} 分
-                  </Descriptions.Item>
-                ))}
-                <Descriptions.Item label="自评总分">
-                  <Tag color="blue">{active.selfTotal}</Tag>
-                </Descriptions.Item>
-              </Descriptions>
-            )}
-
-            <div className="section-title">审核评分</div>
-            <Form form={form} layout="vertical">
-              <Form.Item
-                name="reviewScore"
-                label="审核总分"
-                rules={[
-                  { required: true, message: '请填写审核分' },
-                  { type: 'number', min: 0, max: 100 },
-                ]}
-              >
-                <InputNumber
-                  min={0}
-                  max={100}
-                  style={{ width: 200 }}
-                />
-              </Form.Item>
-              <Form.Item
-                name="reviewComment"
-                label="审核评语"
-                rules={[{ required: true, message: '请填写评语', min: 10 }]}
-              >
-                <Input.TextArea rows={4} placeholder="不少于 10 字" showCount />
-              </Form.Item>
-            </Form>
-
-            {!activeFormDef && (
-              <Statistic
-                title="当前等级（按审核分）"
-                value={calcGrade(form.getFieldValue('reviewScore') || 0)}
-              />
-            )}
-          </>
+        {unsubList.length > 0 ? (
+          <div
+            style={{
+              maxHeight: 360,
+              overflow: 'auto',
+              // 关键：允许鼠标拖选文字（antd 默认样式不影响，这里显式声明）
+              userSelect: 'text',
+              WebkitUserSelect: 'text',
+              whiteSpace: 'pre-line',
+              lineHeight: '28px',
+              fontSize: 14,
+              background: '#fafafa',
+              border: '1px solid #f0f0f0',
+              borderRadius: 6,
+              padding: '12px 16px',
+              cursor: 'text',
+            }}
+          >
+            {unsubList.map((u) => u.name).join('\n')}
+          </div>
+        ) : (
+          <Empty description="本月全员已提交" />
         )}
-      </Drawer>
+      </Modal>
     </div>
   );
 }

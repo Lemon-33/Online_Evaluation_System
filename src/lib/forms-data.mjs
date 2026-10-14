@@ -34,7 +34,11 @@ const rankLead3_0 = () => [
 ];
 
 // 填空题字段（spread 到 item 上）
-const fill = (unitScore, unit = '项') => ({ type: 'fill', unitScore, unit });
+//   hasReason = true 时：自评页会在数量输入框下方再渲染一个 textarea（"请说明为什么得分"），
+//                   员工填写原因后与数量一起以 {count, reason} 形式存到 evaluation.scores.answers；
+//                   审核页会把这个 reason 作为只读字段展示，审核人可改数量但不能改 reason。
+//   单独某道题想要"不要求原因"：在 forms-data.mjs 里那一项上 spread ...fill(..., ...)，再覆盖 hasReason:false
+const fill = (unitScore, unit = '项') => ({ type: 'fill', unitScore, unit, hasReason: true });
 
 export const POSITION_FORMS = {
   // ============== 一、专业技术岗位（4 个） ==============

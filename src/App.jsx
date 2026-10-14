@@ -5,10 +5,16 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import SelfEvaluation from './pages/SelfEvaluation';
 import Review from './pages/Review';
+import ReviewForm from './pages/ReviewForm';
 import EvaluationList from './pages/EvaluationList';
+import BasicRating from './pages/BasicRating';
+import DeductionRating from './pages/DeductionRating';
+import BasicRatingView from './pages/BasicRatingView';
+import ScoreQuery from './pages/ScoreQuery';
 import Profile from './pages/Profile';
+import Backdoor from './pages/Backdoor';
 import { useAuth } from './context/AuthContext';
-import { ROLES } from './lib/constants';
+import { homePath } from './lib/constants';
 
 // 未登录 → 跳 /login
 function RequireAuth({ children }) {
@@ -20,26 +26,18 @@ function RequireAuth({ children }) {
   return children;
 }
 
-// 登录后按角色进入各自的工作台
+// 登录后按身份进入各自的工作台（落页规则见 constants.homePath）
 function RootRedirect() {
   const { user, isAuthed } = useAuth();
   if (!isAuthed) return <Navigate to="/login" replace />;
-  // 员工 → 自评模式 / 管理员 → 审核模式
-  return (
-    <Navigate to={user.role === ROLES.ADMIN ? '/review' : '/self'} replace />
-  );
+  return <Navigate to={homePath(user)} replace />;
 }
 
-// 角色路由守卫：
-// - 员工只能进 /self；进 /review、/list 直接重定向走 /self
-// - 管理员只能进 /review、/list；进 /self 直接重定向走 /review
+// 角色路由守卫：无权限 → 静默重定向到本身份工作台主页
 function RequireRole({ perm, children }) {
   const { can, user } = useAuth();
   if (can(perm)) return children;
-
-  // 没权限 → 静默重定向到自己角色的主页，不显示错误页
-  const fallback = user?.role === ROLES.ADMIN ? '/review' : '/self';
-  return <Navigate to={fallback} replace />;
+  return <Navigate to={homePath(user)} replace />;
 }
 
 export default function App({ mockMode }) {
@@ -57,6 +55,8 @@ export default function App({ mockMode }) {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
+        {/* 后门维护工具：独立布局，内部自检 admin_type=9 */}
+        <Route path="/backdoor" element={<Backdoor />} />
 
         <Route
           element={
@@ -73,6 +73,24 @@ export default function App({ mockMode }) {
               </RequireRole>
             }
           />
+          {/* 个人积分查询：员工自用，管理员也能进（后续做全量排名时调用） */}
+          <Route
+            path="/score-query"
+            element={
+              <RequireRole perm="scoreQuery">
+                <ScoreQuery />
+              </RequireRole>
+            }
+          />
+          {/* 基础积分评价查看：员工只读查看自己的扣分问卷结果（仅员工） */}
+          <Route
+            path="/basic-rating-view"
+            element={
+              <RequireRole perm="basicRatingView">
+                <BasicRatingView />
+              </RequireRole>
+            }
+          />
           <Route
             path="/review"
             element={
@@ -81,11 +99,36 @@ export default function App({ mockMode }) {
               </RequireRole>
             }
           />
+          {/* 整页审核表单：按记录 id 定位（从审核列表「审核」按钮进入） */}
+          <Route
+            path="/review-form/:id"
+            element={
+              <RequireRole perm="review">
+                <ReviewForm />
+              </RequireRole>
+            }
+          />
           <Route
             path="/list"
             element={
               <RequireRole perm="list">
                 <EvaluationList />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/basic-rating"
+            element={
+              <RequireRole perm="basicRating">
+                <BasicRating />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/basic-rating/deduct/:id"
+            element={
+              <RequireRole perm="deductRating">
+                <DeductionRating />
               </RequireRole>
             }
           />

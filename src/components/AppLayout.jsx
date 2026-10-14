@@ -2,16 +2,18 @@ import { Layout, Menu, Dropdown, Avatar, Tag, Space } from 'antd';
 import {
   EditOutlined,
   AuditOutlined,
-  TableOutlined,
   LogoutOutlined,
   UserOutlined,
+  StarOutlined,
+  LineChartOutlined,
+  EyeOutlined,
 } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
-  ROLES,
-  ROLE_META,
   ADMIN_TYPE_META,
+  ADMIN_TYPE_SECRETARY,
+  ADMIN_TYPE_EMPLOYEE,
   findLabel,
   POSITION_TYPES,
   BRANCHES,
@@ -25,41 +27,57 @@ export default function AppLayout() {
   const loc = useLocation();
   const { user, logout, can } = useAuth();
 
+  // 侧边菜单按权限显示：
+  //   员工          → 自评
+  //   分管领导(0)   → 履职贡献评价审核
+  //   组织委员(1)   → 基础积分评价
+  //   支部书记(2)   → 同时显示「履职贡献评价审核」+「基础积分评价」两项
+  //                  （共用分管领导/组织委员的同一组页面，数据范围为全支部）
+  //                  没有「评价汇总」（list 是分管领导专有）
   const items = [
     can('self') && {
       key: '/self',
       icon: <EditOutlined />,
       label: '每月履职贡献自评',
     },
+    can('basicRatingView') && {
+      key: '/basic-rating-view',
+      icon: <EyeOutlined />,
+      label: '基础积分评价查看',
+    },
     can('review') && {
       key: '/review',
       icon: <AuditOutlined />,
-      label: '审核评价',
+      label: '履职贡献评价审核',
     },
-    can('list') && {
-      key: '/list',
-      icon: <TableOutlined />,
-      label: '评价汇总',
+    can('scoreQuery') && {
+      key: '/score-query',
+      icon: <LineChartOutlined />,
+      label: '个人积分查询',
+    },
+    can('basicRating') && {
+      key: '/basic-rating',
+      icon: <StarOutlined />,
+      label: '基础积分评价',
     },
   ].filter(Boolean);
 
-  const modeLabel =
-    user?.role === ROLES.ADMIN ? '管理员审核模式' : '党员自评模式';
-  const modeColor = user?.role === ROLES.ADMIN ? '#fffbe6' : '#e6f7ff';
+  const meta = ADMIN_TYPE_META[user?.adminType] || { text: '未知', color: 'default' };
 
-  const meta = ROLE_META[user?.role] || { text: '未知', color: 'default' };
-
-  // 副标题：两者都显示所在支部；员工额外显示岗位 / 类型
+  // 副标题：普通党员显示岗位；分管领导/组织委员显示所在支部；支部书记显示「可见全体」
   const branchInfo = user?.branch ? findLabel(BRANCHES, user.branch) : '';
-  const subInfo =
-    user?.role === ROLES.EMPLOYEE
-      ? `${findPositionLabel(user.position)} · ${findLabel(
-          POSITION_TYPES,
-          user.positionType
-        )}${branchInfo ? ` · ${branchInfo}` : ''}`
-      : user?.role === ROLES.ADMIN
-      ? `所属：${branchInfo}`
-      : '';
+  const isSecretary = user?.adminType === ADMIN_TYPE_SECRETARY;
+  const isEmployee = user?.adminType === ADMIN_TYPE_EMPLOYEE;
+  const subInfo = isEmployee
+    ? `${findPositionLabel(user.position)} · ${findLabel(
+        POSITION_TYPES,
+        user.positionType
+      )}${branchInfo ? ` · ${branchInfo}` : ''}`
+    : isSecretary
+    ? '可见全体'
+    : branchInfo
+    ? `所属：${branchInfo}`
+    : '';
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -95,20 +113,8 @@ export default function AppLayout() {
             padding: '0 24px',
           }}
         >
-          <div style={{ fontSize: 18, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ fontSize: 18, fontWeight: 600 }}>
             <span>党员评价系统</span>
-            <span
-              style={{
-                fontSize: 12,
-                padding: '2px 10px',
-                background: modeColor,
-                color: user?.role === ROLES.ADMIN ? '#ad6800' : '#096dd9',
-                borderRadius: 12,
-                fontWeight: 500,
-              }}
-            >
-              {modeLabel}
-            </span>
           </div>
           <Dropdown
             menu={{
@@ -136,11 +142,6 @@ export default function AppLayout() {
               <Avatar icon={<UserOutlined />} style={{ background: '#fff', color: '#b71c1c' }} />
               <span>{user?.name || '匿名'}</span>
               <Tag color={meta.color}>{meta.text}</Tag>
-              {user?.role === ROLES.ADMIN && ADMIN_TYPE_META[user?.adminType] && (
-                <Tag color={ADMIN_TYPE_META[user.adminType].color}>
-                  {ADMIN_TYPE_META[user.adminType].text}
-                </Tag>
-              )}
               {subInfo && <span style={{ fontSize: 12, opacity: 0.85 }}>· {subInfo}</span>}
             </Space>
           </Dropdown>

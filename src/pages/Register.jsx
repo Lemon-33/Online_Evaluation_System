@@ -3,7 +3,6 @@ import {
   Form,
   Input,
   Button,
-  Radio,
   Select,
   message,
   Typography,
@@ -12,7 +11,6 @@ import {
 import { UserAddOutlined } from '@ant-design/icons';
 import { useNavigate, Link } from 'react-router-dom';
 import {
-  ROLES,
   POSITION_TYPES,
   BRANCHES,
   getPositionsByType,
@@ -27,7 +25,6 @@ export default function Register() {
   const [submitting, setSubmitting] = useState(false);
   const [form] = Form.useForm();
 
-  const role = Form.useWatch('role', form);
   const positionType = Form.useWatch('positionType', form);
   const positionOptions = getPositionsByType(positionType);
 
@@ -65,16 +62,8 @@ export default function Register() {
           form={form}
           layout="vertical"
           onFinish={onFinish}
-          initialValues={{ role: ROLES.EMPLOYEE }}
           requiredMark
         >
-          <Form.Item label="身份" name="role" rules={[{ required: true }]}>
-            <Radio.Group buttonStyle="solid">
-              <Radio.Button value={ROLES.EMPLOYEE}>员工</Radio.Button>
-              <Radio.Button value={ROLES.ADMIN}>管理员</Radio.Button>
-            </Radio.Group>
-          </Form.Item>
-
           <Form.Item
             label="账号"
             name="username"
@@ -147,36 +136,33 @@ export default function Register() {
             <Select placeholder="请选择所在党支部" options={BRANCHES} />
           </Form.Item>
 
-          {/* 员工专属字段：仅当选择「员工（党员）」身份时显示 */}
-          {role === ROLES.EMPLOYEE && (
-            <>
-              <Form.Item
-                label="岗位类型"
-                name="positionType"
-                rules={[{ required: true, message: '请选择岗位类型' }]}
-                extra="选择岗位类型后，下方岗位下拉会给出对应可选项"
-              >
-                <Select
-                  placeholder="请选择岗位类型"
-                  options={POSITION_TYPES}
-                  allowClear
-                />
-              </Form.Item>
-              <Form.Item
-                label="所在岗位"
-                name="position"
-                rules={[{ required: true, message: '请选择所在岗位' }]}
-              >
-                <Select
-                  placeholder={positionType ? '请选择所在岗位' : '请先选择岗位类型'}
-                  options={positionOptions}
-                  disabled={!positionType}
-                  allowClear
-                  notFoundContent="请先选择岗位类型"
-                />
-              </Form.Item>
-            </>
-          )}
+          {/* 岗位类型 / 岗位：普通党员、组织委员必填；分管领导、支部书记可留空。
+              身份由工号白名单决定，前端无法预知，故此处不强制；
+              留空时由后端按身份校验并返回「请填写岗位类型和岗位」。 */}
+          <Form.Item
+            label="岗位类型"
+            name="positionType"
+            extra="普通党员 / 组织委员 必填；分管领导 / 支部书记 可留空"
+          >
+            <Select
+              placeholder="请选择岗位类型"
+              options={POSITION_TYPES}
+              allowClear
+            />
+          </Form.Item>
+          <Form.Item
+            label="所在岗位"
+            name="position"
+            extra="选择岗位类型后，下方岗位下拉会给出对应可选项"
+          >
+            <Select
+              placeholder={positionType ? '请选择所在岗位' : '请先选择岗位类型'}
+              options={positionOptions}
+              disabled={!positionType}
+              allowClear
+              notFoundContent="请先选择岗位类型"
+            />
+          </Form.Item>
 
           <Button
             type="primary"

@@ -1,333 +1,220 @@
 # 党员评价系统
 
-> 基于 **React 18 + Vite 5 + Ant Design 5**，接入 **CloudBase**（数据库 + 静态托管），支持**党员自评、审核打分、Excel 导出**全流程。
+> **前端**：React 18 + Vite 5 + Ant Design 5
+> **后端**：Node + Express + SQLite（better-sqlite3），代码在 `server/`，接口统一 `/api/*`
+> 两条业务线：**每月履职贡献**（自评 → 审核）与 **基础积分**（组织委员 / 支部书记评价），另含个人积分查询、评价汇总与 Excel 导出。
 
 ## 功能
 
-| 模块 | 说明 |
-| --- | --- |
-| 用户系统 | 注册 + 登录。员工注册时选择「岗位类型 → 岗位 + 所在党支部」，管理员注册时选择「所在党支部」 |
-| 党员自评 | 多维度评分（政治素质 20 + 工作业绩 25 + 联系群众 15 + 纪律作风 20 + 先锋模范 20 = 100） |
-| 审核评价 | 只审核**本人负责支部**的员工，查看自评内容（含岗位 / 类型 / 支部），给出最终分 + 审核评语，支持按年度/状态/姓名筛选 |
-| 评价汇总 | 只汇总本支部数据，支持统计卡片、维度均值、删除（管理员）、一键导出 Excel（含岗位 / 类型列） |
-| 角色权限 | 员工只能自评，管理员只审核/汇总/导出**本支部**数据，按支部隔离 |
-| 数据后端 | 用户注册/登录走 **CloudBase 云函数 + PostgreSQL**（`user_table` 表）；评价数据走 CloudBase 数据库（`evaluations` 集合）；未配置时自动 Mock 到 localStorage |
+| 模块 | 说明 | 谁能用 |
+| --- | --- | --- |
+| 每月履职贡献自评 | 按月提交自评（同一人同年同月一条，重复提交覆盖；该月已审核则锁定不可改） | 组织委员(1)、普通党员(3) |
+| 履职贡献评价审核 | 按指派的名单审核、定稿、删除 | 分管领导(0)、班长、支部书记(2) |
+| 基础积分评价 | 以「扣分问卷」形式评分（满分 100，按扣项累减） | 组织委员(1)、支部书记(2) |
+| 基础积分评价查看 | 只读查看本人各月基础积分与最终得分 | 组织委员(1)、普通党员(3) |
+| 个人积分查询 | 按月 / 按年查询本人积分（基础分 + 履职贡献分 + 加分 / 扣分） | 组织委员(1)、普通党员(3) |
+| 评价汇总 / 导出 | 履职贡献列表统计 + 一键导出 Excel | 能审核的人 |
+| 个人信息 | 查看 / 修改本人资料 | 登录即可 |
 
 ## 快速开始（本地）
 
+**后端**（Express + SQLite）：
+
 ```bash
-# 1. 安装依赖
+cd server
 npm install
-
-# 2. 启动开发服务
-npm run dev
-# 浏览器访问 http://localhost:5173
-
-# 3. 生产构建
-npm run build
-# 产物在 dist/ 目录
+node server.js          # 监听 0.0.0.0:3000，数据库文件 server/party.db（首次启动自动创建）
 ```
 
-> 当前环境如未安装 Node.js，请先到 https://nodejs.org 下载 LTS 版本（≥18）。
+**前端**：
 
-## 角色与权限 / 两种工作模式
+```bash
+npm install
+npm run dev             # http://localhost:5173，/api 反向代理到 VITE_PROXY_TARGET
+```
 
-| 角色 | 登录后默认进入 | 可访问页面 | 说明 |
-| --- | --- | --- | --- |
-| 员工（党员） | `/self`（党员自评模式） | `党员自评` | 只能看自己的分数 + 提交自评；不能访问审核/汇总 |
-| 管理员（支部） | `/review`（管理员审核模式） | `审核评价`、`评价汇总` | 含待审数量徽章；可审核打分、汇总、导出 Excel |
+**生产构建**：
 
-越权访问会**静默重定向**到自己角色的主页，不会显示错误页。
+```bash
+npm run build           # 产物在 dist/
+```
 
-### 岗位类型 → 岗位（级联选择）
+环境变量（可选，写进 `.env.local`）：
 
-员工注册时**先选岗位类型，再选所在岗位**；岗位下拉的可选项由所选岗位类型决定。定义在 `src/lib/constants.js` 的 `POSITION_TYPES` / `POSITIONS_BY_TYPE`。
-
-| 岗位类型 | 可选岗位 |
-| --- | --- |
-| 专业技术岗位党员 | 配网专业技术岗、营销专业技术岗、工程专业技术岗、综合事务岗 |
-| 班组长岗位党员 | 营业班班长、大客户班班长、低压综合服务班班长、配电运检班班长、配电工程班班长 |
-| 班组成员岗位党员 | 营业班班组成员、大客户班班组成员、低压综合服务班班组成员、配电运检班班组成员、配电工程班班组成员 |
-
-> 切换岗位类型会自动清空已选岗位，避免类型与岗位不匹配。
-
-### 所在党支部与「审核范围」隔离
-
-员工与管理员注册时都必须选择所在党支部（**第一党支部 / 第二党支部**），定义在 `src/lib/constants.js` 的 `BRANCHES`。**同一个下拉字段，两种语义**：
-
-| 角色 | 选择党支部的含义 | 系统行为 |
+| 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| 员工 | 我**属于**哪个党支部 | 自评记录带上所属支部，供对应支部的管理员审核 |
-| 管理员 | 我**负责审核**哪个党支部 | 登录后只看到、只审核该支部的员工 |
+| `VITE_API_BASE` | 空 | 留空 = 同域直接请求 `/api/*` |
+| `VITE_PROXY_TARGET` | `http://124.220.236.13` | 本地开发时 `/api` 的反代目标 |
+| `VITE_PUBLIC_BASE` | `/` | 静态资源前缀 |
+| `VITE_USE_MOCK` | 未设 | `true` = 前端降级到 localStorage，不连后端 |
 
-管理员的数据范围隔离体现在：
+> 未安装 Node.js 时请先装 LTS 版本（≥18）。
 
-- **审核页面**：只列出本支部待审/已审核员工，统计卡也只统计本支部
-- **评价汇总**：只汇总本支部数据，导出的 Excel 也只含本支部
-- 顶部会明确提示「负责审核：第一党支部」
+## 身份与权限
 
-- 员工注册顺序：岗位类型 → 所在岗位 → **所在党支部**
-- 管理员注册顺序：**所在党支部**
-- 员工进入自评页时，「所在党支部」自动带入且只读
+### 身份（`admin_type`）
 
-> 数据隔离目前在前端实现（`listEvaluations({ branch })`）。生产环境请在 CloudBase **安全规则 / 云函数**中按登录用户身份做同样的限制，避免前端被绕过。
+**所有人同一个登录入口、同一套界面**，只有菜单和数据范围按身份不同。身份**只由工号决定**，注册页不让用户选身份。
 
-### 自评模式（员工）进入后看到
+| admin_type | 身份 | 工号来源 | 是否自评 | 岗位类型 |
+| --- | --- | --- | --- | --- |
+| 0 | 分管领导 | 白名单 | 否 | 可留空 |
+| 1 | 组织委员 | 白名单 | 是 | **必填** |
+| 2 | 支部书记 | 白名单 | 否 | 可留空 |
+| 3 | 普通党员 | 白名单 | 是 | **必填** |
 
-- 顶部蓝色 banner：「党员自评模式」+ 姓名 + 岗位 / 岗位类型
-- 当前年度未提交：空状态卡片引导提交
-- 已提交待审核：展示「我的当前分数」+ 「等待管理员审核」徽章
-- 已审核：右侧高亮金色卡片「最终审核结果」，含最终分 / 等级 / 审核人 / 评语；表单自动锁定
+白名单**唯一真源**是 `server/admin-whitelist.mjs`（前端不持有副本），当前登记：
 
-### 审核模式（管理员）进入后看到
-
-- 顶部金色 banner：「管理员审核模式」+ 姓名 + **负责审核：第一党支部**
-- 三张统计卡：本支部当前年度待审 / 已审核 / 当前列表
-- 待审徽章（红点）：一眼看出还有多少条待办
-- 表格默认筛选「待审核」，**只含本支部员工**，点击行在 Drawer 中给分 + 写评语
-
-> 顶栏右侧的胶囊标签会动态显示当前模式（管理员审核模式 / 党员自评模式），方便区分当前账号身份。
-
-## 用户数据存在哪
-
-用户注册 / 登录走 **PostgreSQL 表 `user_table`**，链路是：
-
-```
-浏览器 → CloudBase 云函数 userService → PostgreSQL (user_table)
-```
-
-> 为什么不直连数据库：连接串含密码，写进前端等于公开。云函数里从**环境变量**读取，前端拿不到。
-
-### 字段映射
-
-| 前端字段 | 数据库列 | 类型 | 说明 |
+| 工号区间 | admin_type | 身份 | 人数 |
 | --- | --- | --- | --- |
-| `id` | `id` | uuid | 主键，`gen_random_uuid()` 自动生成，前端不传、不可改 |
-| `username` | `user_id` | varchar(30) | 登录账号，**唯一** |
-| `password` | `pw` | varchar(30) | 密码 |
-| `role` | `admin` | boolean | `TRUE` = 管理员，`FALSE` = 员工 |
-| `positionType` | `type` | varchar(20) | 管理员存 `NULL` |
-| `position` | `job` | varchar(50) | 管理员存 `NULL` |
-| `name` | `name` | varchar(100) | 中文姓名 |
-| `branch` | `branch` | varchar(10) | `first` / `second` |
+| `W-0001` ~ `W-0004` | 0 | 分管领导 | 4 |
+| `W-0005` ~ `W-0006` | 1 | 组织委员 | 2 |
+| `W-0007` ~ `W-0048` | 3 | 普通党员 | 42 |
+| `000001` / `000002` | 2 | 支部书记 | 2 |
 
-映射代码在 `src/lib/userService.js`，所以自评 / 审核 / 汇总等页面**完全不用改**。
+### 菜单矩阵
 
-### 重名怎么处理
+| admin_type | 侧边栏 |
+| --- | --- |
+| 3 普通党员 | 每月履职贡献自评 · 基础积分评价查看 · 履职贡献评价审核（**仅有审核对象时**）· 个人积分查询 |
+| 1 组织委员 | 上面前四项 + **基础积分评价** |
+| 0 分管领导 | 仅 **履职贡献评价审核** |
+| 2 支部书记 | 履职贡献评价审核 · 基础积分评价 |
 
-注册时如果 `user_id` 已存在，数据库唯一索引会拒绝插入，云函数返回 `USER_EXISTS`，页面提示：
+### 数据范围（后端强制，前端参数不可越权）
 
-> **用户名已经存在，请选择一个新的用户名**
+| 业务线 | 谁 | 能看到 / 能审谁 |
+| --- | --- | --- |
+| 履职贡献 | 分管领导(0)、班长 | `review_assignment` 里**指给我**的人 |
+| 履职贡献 | 支部书记(2) | **全体** |
+| 履职贡献 | 本人 | 始终能看到自己的自评 |
+| 基础积分 | 组织委员(1) | **本支部** `admin_type IN (1, 3)`，**含自己** |
+| 基础积分 | 支部书记(2) | **全体** |
+| 个人积分查询 | 组织委员(1) / 普通党员(3) | 只能查**自己** |
 
-不会产生半条脏数据。前端在 `AuthContext.register()` 里还前置判断一次，保证提示及时。
+### 登录后默认落地页
 
-⚠️ **前提**：表上必须有 `user_id` 的唯一约束，执行 `scripts/user-table.sql` 的第 3 步即可加上。
+定义在 `src/lib/constants.js` 的 `homePath()`：
 
-### 关于 `id`
+| 身份 | 落地页 |
+| --- | --- |
+| 分管领导(0) / 支部书记(2) | `/review` |
+| 组织委员(1) | `/basic-rating` |
+| 普通党员(3) | `/self` |
 
-`id` 由数据库 `DEFAULT gen_random_uuid()` 生成：128 位随机 uuid，不可枚举、不可猜测，注册流程**根本不传这个字段**，所以用户无从修改。
+越权访问会**静默重定向**回自己的工作台首屏，不显示错误页。
 
-> 想改成「姓名首字母 + 日期」这种可读编号的话，uuid 列装不下，需要另加一列 `varchar`（例如 `user_no`），主键保持 uuid 更安全。
+## 岗位类型 → 岗位（级联选择）
 
-### 初始管理员
+注册时**先选岗位类型，再选岗位**；切换类型会自动清空已选岗位。定义在 `src/lib/constants.js` 的 `POSITION_TYPES` / `POSITIONS_BY_TYPE`。
 
-数据库里没有内置账号，需要手动插一条（`scripts/user-table.sql` 末尾有现成语句）：
+| 岗位类型 | value | 可选岗位 |
+| --- | --- | --- |
+| 专业技术岗位党员 | `professional` | 配网专业技术岗、营销专业技术岗、工程专业技术岗、综合事务岗 |
+| 班组长岗位党员 | `teamLeader` | 营业班班长、大客户班班长、低压综合服务班班长、配电运检班班长、配电工程班班长 |
+| 班组成员岗位党员 | `teamMember` | 营业班班组成员、大客户班班组成员、低压综合服务班班组成员、配电运检班班组成员、配电工程班班组成员 |
 
-```sql
-INSERT INTO user_table (user_id, pw, admin, name, branch)
-VALUES ('admin', 'admin123', TRUE, '默认管理员', 'first');
-```
+> 组织委员(1) / 普通党员(3) **必填**；分管领导(0) / 支部书记(2) 可留空。是否需要填写由**后端**按工号判定（留空返回 `POSITION_REQUIRED`），前端不做预校验。
 
-### 首次进入建议（体验支部隔离）
+## 所在党支部（`branch`）
 
-1. 执行上面的 SQL 建一个 `admin`（第一党支部）
-2. 打开 `/register` 注册员工账号，**第一、第二党支部各注册一个**
-3. 注册第二党支部的管理员（需要填写**第二党支部**自己的管理员密钥；两个支部密钥不通用，密钥在后端 `server/server.js` 的 `ADMIN_INVITE_CODES`，由后端校验）
-4. 用员工账号登录 → `/self` 完成自评
-5. 用 `admin` 登录 → `/review` 只看到第一党支部的员工
-6. 换第二党支部管理员登录 → 只看到第二党支部的员工，两者互不可见
+定义在 `src/lib/constants.js` 的 `BRANCHES`（第一党支部 / 第二党支部）。
 
-> 当前 `pw` 存的是**明文**（演示用）。上线前建议改成 bcrypt 哈希（把 `pw` 扩到 `varchar(60)`），并把密码校验逻辑迁到云函数内完成。
+| 身份 | 「党支部」的含义 | 作用 |
+| --- | --- | --- |
+| 普通党员(3) / 组织委员(1) | 我**属于**哪个支部 | 自评记录带上所属支部 |
+| 组织委员(1) | 我**负责评价**哪个支部 | 基础积分范围 = 本支部 `admin_type IN (1, 3)`（含自己） |
+| 支部书记(2) | — | 可见全体，不受支部限制 |
 
-## 接入 CloudBase
+## 审核关系（`review_assignment`）
 
-### 1) 创建环境
-- 登录 [CloudBase 控制台](https://console.cloud.tencent.com/tcb) ，创建一个新环境（计费选「按量付费」即可）。
-- 记下 **环境 ID**（形如 `your-env-id-1234567890`）。
+「谁审谁」由 SQLite 表 `review_assignment` 显式决定，代码**不做**按支部 / 岗位的自动匹配。
 
-### 2) 配置环境变量
-复制 `.env.example` 为 `.env.local`：
+- 分管领导、班长 → 手工登记各自的被审对象（支持后期直接改库维护）。
+- 支部书记 → **不登记**：范围 = 全体（`admin_type = 2` 在代码里特判）。
+- 没有被指派任何审核对象的人 → 菜单里不出现「履职贡献评价审核」。
+- 审核对象变化后，被指派者需**重新登录**才会刷新菜单（`hasReviewTargets` 在登录时下发）。
 
-```bash
-cp .env.example .env.local
-```
+维护 SQL 与常见场景见 **`部署与审核关系维护.md` §6**。
 
-填入：
+## 基础积分评价
 
-```
-VITE_TCB_ENV=your-env-id-1234567890
-VITE_USE_MOCK=false
-```
+| 谁 | 范围 |
+| --- | --- |
+| 组织委员(1) | 本支部 `admin_type IN (1, 3)`，**含自己** |
+| 支部书记(2) | **全体** |
 
-### 3) 创建 PostgreSQL 用户表 + 部署云函数
+- 被评对象集合是 `server/server.js` 里的常量 `BASIC_RATING_TYPES = [1, 3]`；以后要把分管领导 / 支部书记也纳入被评名单，**只改这一个数组**。
+- 记录**惰性生成**：本支部第一个组织委员 / 支部书记打开某月页面时，为该支部所有 `admin_type IN (1,3)` 的人补一条 `pending` 记录。
+- 分管领导(0) 既不自评、也没有基础积分记录，只作为**审核人**存在。
 
-**a. 建表 / 校正约束**
+## 页面与路由
 
-打开 CloudBase 控制台 → 数据库 → PostgreSQL → SQL 查询窗口，执行 `scripts/user-table.sql`。它会：
+| 路由 | 页面 | 权限 key |
+| --- | --- | --- |
+| `/login`、`/register` | 登录 / 注册 | 公开 |
+| `/`、`*` | 按身份跳到工作台 | 登录 |
+| `/self` | 每月履职贡献自评 | `self` |
+| `/review`、`/review-form/:id` | 履职贡献评价审核 / 整页审核表单 | `review` |
+| `/list` | 评价汇总 + Excel 导出 | `list` |
+| `/basic-rating` | 基础积分评价 | `basicRating` |
+| `/basic-rating/deduct/:id` | 扣分问卷评分 | `deductRating` |
+| `/basic-rating-view` | 基础积分评价查看 | `basicRatingView` |
+| `/score-query` | 个人积分查询 | `scoreQuery` |
+| `/profile` | 个人信息 | 登录即可 |
 
-- 补上 `created_at` 列（云函数返回值里有它，缺了会报错）
-- 给 `id` 加上 `DEFAULT gen_random_uuid()`
-- 给 `user_id` 加**唯一约束**（重名检测靠它）
-- 加 `branch` 取值约束、角色与岗位的一致性约束
-
-**b. 配置云函数环境变量**
-
-控制台 → 云函数 → `userService` → 函数配置 → 环境变量：
-
-```
-PG_CONNECTION_STRING = postgresql://用户名:密码@主机:5432/数据库名
-PG_SSL               = true      # 仅当用公网地址连接时需要
-```
-
-> 连接串是**服务端密钥**，不要写进 `.env.local` 或任何前端文件。
-
-**c. 部署云函数**
-
-```bash
-npm i -g @cloudbase/cli
-tcb login
-tcb fn deploy userService
-```
-
-`cloudbaserc.json` 里已配好 `installDependency: true`，云端会自动安装 `pg` 依赖。
-
-**d. 前端切到真实模式**
-
-`.env.local`：
-
-```
-VITE_TCB_ENV=lhr20000711-d0gfnvzhdf1b2802d
-VITE_USE_MOCK=false
-```
-
-改完重启 `npm run dev`。
-
-### 4) 初始化评价集合（evaluations）
-执行一次性脚本（需先 `npm i -g @cloudbase/cli` 并 `tcb login`）：
-
-```bash
-TCB_ENV=your-env-id-1234567890 node scripts/init-db.js
-```
-
-脚本会创建 `evaluations` 集合并设置权限。完成后到控制台「数据库 -> evaluations -> 索引管理」手动创建索引：
-
-```
-索引名: idx_name_year
-字段:   { name: 1, year: 1 }
-唯一:   是
-```
-
-> 该索引保证同一党员同一年度只有一条自评记录。
-> 注意：评价数据目前仍在**文档数据库**里。如果你也想迁到 PostgreSQL，可以照 `userService` 的模式再加一个云函数，前端只需改 `src/lib/cloudbase.js`。
-
-### 5) 集合数据结构（`evaluations`）
-
-```jsonc
-{
-  "_id": "auto",
-  "name": "张三",                  // 党员姓名
-  "partyBranch": "第一党支部",      // 党支部
-  "year": 2026,                    // 评价年度
-  "scores": {                      // 分项自评
-    "politicalQuality": 18,
-    "workPerformance": 22,
-    "massContact": 13,
-    "disciplineCompliance": 18,
-    "innovation": 17
-  },
-  "selfTotal": 88,                 // 自评总分（自动计算）
-  "reviewStatus": "pending",       // pending / reviewed
-  "reviewerName": "李书记",
-  "reviewScore": 90,
-  "reviewComment": "表现突出，建议在...",
-  "reviewedAt": "2026-10-10 12:00:00",
-  "createdAt": "2026-10-09 10:00:00",
-  "updatedAt": "2026-10-10 12:00:00"
-}
-```
-
-### 6) 部署到静态托管
-
-**方式 A：CloudBase CLI（推荐）**
-
-```bash
-# 安装 CLI
-npm i -g @cloudbase/cli
-tcb login
-
-# 修改 cloudbaserc.json 中的 envId 为你的环境 ID
-# 然后执行
-tcb framework deploy
-```
-
-CLI 会自动构建（也可手动 `npm run build` 后）并把 `dist/` 上传到静态托管。
-
-**方式 B：手动上传**
-
-1. `npm run build` 生成 `dist/`
-2. CloudBase 控制台 -> 静态网站托管 -> 上传文件，把 `dist/` 整个目录上传。
-3. 在「基础配置」中把**默认首页**设为 `index.html`、**默认 404** 也设为 `index.html`（保证 SPA 路由刷新不 404）。
+权限由两处决定：后端 `server/server.js` 的**谓词 + 数据范围**（真正的边界），前端 `src/context/AuthContext.jsx` 的 `can()`（只控制菜单与路由显隐）。
 
 ## 目录结构
 
 ```
-party-evaluation/
-├─ cloudbaserc.json          # CloudBase 部署配置（静态托管 + 云函数）
-├─ index.html                # 入口 HTML
+├─ index.html
 ├─ package.json
-├─ vite.config.js
-├─ cloudfunctions/
-│  └─ userService/           # 用户注册 / 登录云函数（pg 连 PostgreSQL）
-│     ├─ index.js
-│     └─ package.json
-├─ scripts/
-│  ├─ user-table.sql         # PostgreSQL 建表 / 约束校正
-│  └─ init-db.js             # 文档数据库集合 / 权限初始化
+├─ vite.config.js              # 开发代理 / 构建配置
+├─ README.md
+├─ 部署与审核关系维护.md          # 部署步骤 + 审核关系维护 SQL
+├─ server/                     # 后端（Express + SQLite）
+│  ├─ server.js                # 接口 + 建表 + 身份谓词 + 数据范围
+│  ├─ admin-whitelist.mjs      # 工号白名单（身份唯一真源）
+│  ├─ package.json
+│  └─ party.db                 # 运行时自动生成（勿提交）
 ├─ src/
-│  ├─ App.jsx                # 路由 + 权限守卫
-│  ├─ main.jsx               # 启动入口
+│  ├─ App.jsx                  # 路由 + 权限守卫
+│  ├─ main.jsx
 │  ├─ styles.css
-│  ├─ components/
-│  │  └─ AppLayout.jsx       # 侧边栏布局
-│  ├─ context/
-│  │  └─ AuthContext.jsx     # 注册 / 登录 / 角色
+│  ├─ components/AppLayout.jsx # 侧边栏 + 顶栏
+│  ├─ context/AuthContext.jsx  # 注册 / 登录 / can() 权限矩阵
 │  ├─ lib/
-│  │  ├─ userService.js      # 用户数据层（云函数调用 + 字段映射 + Mock）
-│  │  ├─ cloudbase.js        # CloudBase SDK 封装（含 Mock 兜底）
-│  │  ├─ excel.js            # Excel 导出
-│  │  └─ constants.js        # 评分维度 / 等级 / 岗位 / 支部 / 管理员密钥
-│  └─ pages/
-│     ├─ Login.jsx
-│     ├─ Register.jsx        # 注册（角色分流 + 管理员密钥）
-│     ├─ SelfEvaluation.jsx  # 自评表单
-│     ├─ Review.jsx          # 审核页面
-│     └─ EvaluationList.jsx  # 汇总 + 导出
-└─ README.md
+│  │  ├─ cloudbase.js          # 前端数据访问层（fetch + Bearer token + Mock 兜底）
+│  │  ├─ userService.js        # 注册 / 登录 / 字段映射
+│  │  ├─ constants.js          # 身份常量 / 岗位 / 支部 / 落地页
+│  │  ├─ deduction-form.js     # 基础积分扣分问卷定义与算分
+│  │  ├─ forms-data.mjs        # 履职贡献表单数据
+│  │  └─ excel.js              # Excel 导出
+│  └─ pages/                   # Login / Register / SelfEvaluation / Review / ReviewForm /
+│                              # EvaluationList / BasicRating / DeductionRating /
+│                              # BasicRatingView / ScoreQuery / Profile
+└─ dist/                       # 构建产物（部署时与 server.js 同级）
 ```
 
-## 安全规则建议（生产）
+## 部署
 
-`scripts/init-db.js` 默认开的是「全员可读写」，仅用于内部试用。生产建议改为：
+简要流程：**构建 → 上传 → 清库 → 重启**。
 
-```js
-// 仅管理员可读全部，党员本人可写自己的记录
-{
-  read: "auth.role == 'admin' || doc.name == auth.name",
-  write: "auth.role in ['admin','reviewer'] || doc.name == auth.name"
-}
-```
+1. `npm run build` 生成 `dist/`；
+2. 上传 `server/server.js`、`server/admin-whitelist.mjs` 和整个 `dist/`；
+3. 结构性改动（去掉 `admin` 列、新增 `review_assignment`）必须**删除服务器上的 `party.db`** 后重启，表会按新结构重建；
+4. 重启后端 `node server.js`。
 
-并接入 CloudBase **用户管理 / 自定义登录** 做实名。
+完整步骤、清库原因、验证清单与排错表见 **`部署与审核关系维护.md`**。
+
+## 已知遗留 / 待办
+
+- `pw` 目前是**明文**存储（演示用）。上线前建议改为 bcrypt 哈希（`pw` 列需扩长），校验逻辑放在后端。
+- `src/lib/constants.js` 里的 `ROLES` / `ROLE_META` 是旧「员工 / 管理员」模型的残留，新代码统一用 `admin_type`。
+- `src/lib/cloudbase.js`、`initCloudBase()` 是 CloudBase 时代的**命名遗留**，实际是自建后端访问层 + Mock 兜底。
+- Mock 模式（`VITE_USE_MOCK=true`）数据存在浏览器 localStorage，仅供本地调试，不要在正式环境开启。
+- 目录下已无实际使用的 CloudBase 云函数 / 脚本；如需清理请另行确认后再删。
 
 ## License
 

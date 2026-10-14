@@ -4,8 +4,8 @@
 // 降级模式：VITE_USE_MOCK=true 时用 localStorage 模拟，
 //          结构与真实一致（同样是 snake_case），保证两种模式行为统一。
 
-import { apiRequest, isMockMode } from './cloudbase';
-import { ROLES } from './constants';
+import { apiRequest, isMockMode, setToken, clearToken } from './cloudbase';
+import { ROLES, ADMIN_TYPE_EMPLOYEE } from './constants';
 
 const MOCK_KEY = 'mock_user_table';
 
@@ -16,10 +16,9 @@ const DEFAULT_MOCK_USERS = [
     id: 'mock-admin-default',
     user_id: 'admin',
     pw: 'admin123',
-    work_id: 'W-0001',
-    admin: true,
-    admin_type: 0,
-    name: '默认管理员',
+    work_id: '000001',
+    admin_type: 2, // 支部书记
+    name: '默认支书',
     type: null,
     job: null,
     branch: 'first',
@@ -75,16 +74,19 @@ const mockLogin = ({ user_id, pw }) => {
 // 保持前端 user 结构不变，其他页面（自评 / 审核 / 汇总）无需改动
 export function mapUserFromDb(row) {
   if (!row) return null;
-  // SQLite 的布尔值存为 0 / 1，这里做兼容
-  const isAdmin =
-    row.admin === true || row.admin === 1 || row.admin === '1' || row.admin === 'true';
+  // 身份完全由 admin_type 决定（0=分管领导 1=组织委员 2=支部书记 3=普通党员）
+  const adminType =
+    row.admin_type == null ? ADMIN_TYPE_EMPLOYEE : Number(row.admin_type);
+  // 兼容旧页面的 role 判断：只有普通党员算 employee，其余视为审核端(admin)
+  const role = adminType === ADMIN_TYPE_EMPLOYEE ? ROLES.EMPLOYEE : ROLES.ADMIN;
   return {
     id: row.id,
     username: row.user_id,
     name: row.name,
     workId: row.work_id || '',
-    role: isAdmin ? ROLES.ADMIN : ROLES.EMPLOYEE,
-    adminType: (row.admin_type === 1 || row.admin_type === '1') ? 1 : 0, // 0=分管领导, 1=组织委员
+    role,
+    adminType,
+    hasReviewTargets: !!row.hasReviewTargets,
     position: row.job || '',
     positionType: row.type || '',
     branch: row.branch || '',
@@ -93,14 +95,13 @@ export function mapUserFromDb(row) {
 }
 
 // 前端注册表单 → 数据库列
-// 注意：admin / admin_type 由后端按 role + work_id 共同决定后写入
-export function toDbPayload({ username, password, name, workId, role, position, positionType, branch }) {
+// 注意：admin_type 由后端按 work_id 白名单决定后写入，前端不再传 role
+export function toDbPayload({ username, password, name, workId, position, positionType, branch }) {
   return {
     user_id: username,
     pw: password,
     name,
     work_id: workId,
-    role, // 'employee' | 'admin' — 后端校验 work_id 与 role 的一致性
     type: positionType,
     job: position,
     branch,
@@ -108,20 +109,15 @@ export function toDbPayload({ username, password, name, workId, role, position, 
 }
 
 // ---------- 对外接口：注册 ----------
-// 前端把用户选的 role 传给后端；后端按 work_id 查白名单，并校验
-//   - role='admin' 要求 work_id 在白名单前 4
-//   - role='employee' 要求 work_id 在白名单非前 4
-// 不在前端做预校验。
+// 前端只提交表单字段；身份（admin_type）由后端按 work_id 白名单决定并落库，
+// 岗位类型是否必填也由后端判定。前端不做预校验。
+// 注册**不签发会话**：成功后需重新登录（故这里不 setToken）。
 export async function registerUser(values) {
   const payload = toDbPayload(values);
 
   if (isMockMode()) {
-    // mock 模式无后端校验，按用户选的 role 写入
-    const row = {
-      ...payload,
-      admin: payload.role === ROLES.ADMIN ? 1 : 0,
-      admin_type: 0,
-    };
+    // mock 模式无后端白名单：一律按普通党员(3)落库，便于本地跑通
+    const row = { ...payload, admin_type: ADMIN_TYPE_EMPLOYEE };
     const res = mockRegister(row);
     return { ...res, user: mapUserFromDb(res.user) };
   }
@@ -146,5 +142,36 @@ export async function loginUser({ username, password }) {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+  // 登录成功 → 保存服务端签发的会话 token
+  if (result?.token) setToken(result.token);
   return { ...result, user: mapUserFromDb(result?.user) };
+}
+
+// ---------- 后门登录 ----------
+//   调 /api/backdoor/login（独立端点，不走普通 /api/login 的"工号必须已注册"校验）。
+//   前端只在 username === 'superadmin' 时调用一次（AuthContext.login 负责分流）。
+//   失败时只回传后端错误码，不在前端硬编码密码做校验——避免密码散落到前端 bundle。
+export async function loginBackdoor({ password }) {
+  if (isMockMode()) {
+    return { code: 'BAD_CREDENTIALS', message: 'Mock 模式不支持后门登录' };
+  }
+  const result = await apiRequest('/api/backdoor/login', {
+    method: 'POST',
+    body: JSON.stringify({ user: 'superadmin', password }),
+  });
+  if (result?.token) setToken(result.token);
+  return { ...result, user: mapUserFromDb(result?.user) };
+}
+
+// ---------- 对外接口：退出登录 ----------
+// 告知服务端注销会话（token 立即失效），并清掉本地 token。
+// 服务端不可达时静默失败 —— 本地 token 照样清，最多服务端会话多活几天自然过期。
+export async function logoutUser() {
+  if (isMockMode()) return;
+  try {
+    await apiRequest('/api/logout', { method: 'POST' });
+  } catch {
+    /* 网络异常不阻塞登出 */
+  }
+  clearToken();
 }

@@ -32,7 +32,8 @@ export default function Profile() {
       >
         <Descriptions column={2} bordered size="middle">
           <Descriptions.Item label="姓名">{user?.name}</Descriptions.Item>
-          <Descriptions.Item label="工号">{user?.username}</Descriptions.Item>
+          {/* 对应数据库 user_table.user_id（登录账号），非工作证编号 */}
+          <Descriptions.Item label="用户名">{user?.username}</Descriptions.Item>
           <Descriptions.Item label="工作证编号">{user?.workId || '-'}</Descriptions.Item>
           <Descriptions.Item label="身份">
             <Space size={4}>
@@ -47,9 +48,9 @@ export default function Profile() {
             </Space>
           </Descriptions.Item>
           <Descriptions.Item label="所在党支部">
-            {findLabel(BRANCHES, user?.branch) || '-'}
+            {user?.branch ? findLabel(BRANCHES, user.branch) || '-' : '-'}
           </Descriptions.Item>
-          {!isAdmin && (
+          {(user?.positionType || user?.position) && (
             <>
               <Descriptions.Item label="岗位类型">
                 {findLabel(POSITION_TYPES, user?.positionType) || '-'}

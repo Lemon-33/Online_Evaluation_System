@@ -24,6 +24,8 @@ import {
   TrophyOutlined,
   StarFilled,
   CalendarOutlined,
+  MinusCircleOutlined,
+  AuditOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
@@ -35,14 +37,15 @@ import {
   POSITION_TYPES,
   findLabel,
   findPositionLabel,
-  ROLES,
 } from '../lib/constants';
 import { getMyEvaluation, submitSelfEvaluation, listEvaluations } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
 
 export default function SelfEvaluation() {
   const { user } = useAuth();
-  const isAdmin = user?.role === ROLES.ADMIN;
+  // 自评页仅 admin_type∈{1,3}（普通党员 / 组织委员）使用，始终按「被评人」处理：
+  // 「履职扣分」段只在已审核时回显，不做可编辑展示（故恒为 false）
+  const isAdmin = false;
   const [form] = Form.useForm();
   const [year, setYear] = useState(dayjs().year());
   const [month, setMonth] = useState(dayjs().month() + 1);
@@ -67,14 +70,14 @@ export default function SelfEvaluation() {
       return arr.reverse(); // 最近的年份排前面
     }, []);
 
-    // 填空题：无论何时进入页面都强制默认 0（选择题保留 rec 中的旧值用于回显修改）
+    // 填空题：无论何时进入页面都强制默认 { count: 0, reason: '' }（选择题保留 rec 中的旧值用于回显修改）
       const fillDefaults = (answers, fd) => {
         if (!fd) return answers;
         const out = { ...answers };
         fd.sections.forEach((sec) =>
           sec.items.forEach((it) => {
             if (it.type === 'fill') {
-              out[it.key] = 0;
+              out[it.key] = { count: 0, reason: '' };
             }
           })
         );
@@ -86,25 +89,58 @@ export default function SelfEvaluation() {
     // 切换账号/月份前先把表单清空，避免上一个账号的 setFieldsValue 残留
     form.resetFields();
     // 并行取两份数据：当前月的记录 + 当年全部记录（供月历展示）
+    // workId 优先传入，用于区分同名员工（展示层不变，仅数据匹配用）
     const [rec, all] = await Promise.all([
-      getMyEvaluation(user.name, y, m),
+      getMyEvaluation(user.name, y, m, user.workId),
       listEvaluations({ year: y, keyword: user.name }),
     ]);
     setExisting(rec);
-    // keyword 是模糊搜索（"张三"可能搜到"张三丰"），需精确过滤本人
+    // keyword 是模糊搜索（"张三"可能搜到"张三丰"），需精确过滤本人：
+    // 有工号按工号匹配（同名不同人也能锁定本人），无工号回落按姓名
     const byMonth = {};
     all
-      .filter((x) => x.name === user.name)
+      .filter((x) =>
+        user.workId ? x.work_id === user.workId : x.name === user.name
+      )
       .forEach((x) => {
         byMonth[x.month || 1] = x.reviewStatus;
       });
     setMonthRecords(byMonth);
     if (rec) {
       // 兼容两种历史数据：岗位表单（scores.answers）与通用 5 项（直接分值）
+      // 已审核回显规则（仅展示层，后端不动）：
+      //   - 基础履职 / 提质赋分（"前两部分"）的填空题：
+      //       count  = 审核人定稿（reviewScores）
+      //       reason = 员工原始自评（scores，员工自述保留）
+      //   - 履职扣分：员工自评没填过，整段从 reviewScores 取（含 count+reason）
+      //   - 选择题 / 通用 5 项打分：保持员工原始自评
+      const userAnswers = rec.scores?.answers || {};
+      const reviewAnswers = rec.reviewScores?.answers || {};
+      const answers = fillDefaults(userAnswers, formDef);
+      formDef?.sections.forEach((sec) => {
+        const isDeduct = sec.title === '履职扣分';
+        sec.items.forEach((it) => {
+          const r = reviewAnswers[it.key];
+          if (r === undefined || r === null) return; // 审核人没动过 → 保持员工原始
+          if (isDeduct) {
+            // 扣分由审核人整段录入：原样覆盖
+            answers[it.key] = r;
+          } else if (it.type === 'fill') {
+            // 前两部分填空题：count 取审核人定稿，reason 保留员工自评
+            const u = userAnswers[it.key] || {};
+            const userReason = typeof u === 'object' ? (u.reason ?? '') : '';
+            const reviewCnt = Number(r?.count ?? r) || 0;
+            answers[it.key] = { count: reviewCnt, reason: userReason };
+          } else {
+            // 选择题：保持员工原始自评（审核人通常不动选择题）
+            // （如果以后需要让审核人改选择题，把这行去掉即可）
+          }
+        });
+      });
       form.setFieldsValue({
         partyBranch: user?.branch || rec.partyBranch || '',
         scores: rec.scores?.answers ? {} : rec.scores || {},
-        answers: fillDefaults(rec.scores?.answers || {}, formDef),
+        answers,
       });
       setScores(rec.scores?.answers ? {} : rec.scores || {});
     } else {
@@ -127,8 +163,14 @@ export default function SelfEvaluation() {
   const formDef = getPositionForm(user?.position);
   const watchedScores = Form.useWatch('scores', form) || scores;
   const watchedAnswers = Form.useWatch('answers', form) || {};
-  const total = formDef
-    ? calcFormTotal(formDef, watchedAnswers)
+  // 员工侧「自评总分」不含履职扣分（扣分由审核人填写，结果看「最终审核结果」卡片）；
+  // 已审核回显扣分答案后这里显式排除，避免总分被扣分拉低。管理员侧沿用整表单。
+  const totalFormDef =
+    formDef && !isAdmin
+      ? { sections: formDef.sections.filter((s) => s.title !== '履职扣分') }
+      : formDef;
+  const total = totalFormDef
+    ? calcFormTotal(totalFormDef, watchedAnswers)
     : calcTotal(watchedScores);
 
   const onSubmit = async () => {
@@ -155,11 +197,13 @@ export default function SelfEvaluation() {
           if (!isAdmin && sec.title === '履职扣分') continue; // 员工无扣分题
           for (const it of sec.items) {
             const v = answers[it.key];
+            // 填空题新形状 {count, reason}：只校验 count 必填且为数字
+            const cnt = it.type === 'fill' ? v?.count ?? v : v;
             const empty =
-              v === undefined ||
-              v === null ||
-              v === '' ||
-              (it.type === 'fill' && !Number.isFinite(Number(v)));
+              cnt === undefined ||
+              cnt === null ||
+              cnt === '' ||
+              (it.type === 'fill' && !Number.isFinite(Number(cnt)));
             if (empty) missing.push(`「${sec.title}」${it.label}`);
           }
         }
@@ -181,6 +225,7 @@ export default function SelfEvaluation() {
       const payload = {
         ...values,
         name: user.name,
+        work_id: user.workId || '', // 员工工号：服务端按此区分同名员工
         position: user.position,
         positionType: user.positionType,
         branch: user.branch, // 所属党支部（注册时确定）
@@ -199,7 +244,18 @@ export default function SelfEvaluation() {
           ? `已覆盖更新 ${year} 年 ${month} 月的自评，审核人以本次提交为准`
           : `${year} 年 ${month} 月自评提交成功，等待审核`
       );
-      reload(year, month);
+      // 保留表单内容（不调 reload：reload 内部会 form.resetFields() 再 setFieldsValue()，
+      //   那一瞬"清空再回填"在网速慢时看起来像被清了）。
+      // 这里只刷新"已提交"状态字段：existing + 月历的当月格子；
+      //   表单维持用户刚填的值 → 可直接改、可再次提交。
+      try {
+        const updated = await getMyEvaluation(user.name, year, month, user.workId);
+        setExisting(updated);
+        setMonthRecords((prev) => ({ ...prev, [month]: updated?.reviewStatus || 'pending' }));
+      } catch {
+        // 即便拉最新记录失败，提交本身已成功；至少把月历当月标 pending，不影响表单
+        setMonthRecords((prev) => ({ ...prev, [month]: 'pending' }));
+      }
     } catch (e) {
       if (e?.errorFields) {
         // antd 校验兜底（理论上主动校验后不会到这里，留作双保险）
@@ -230,6 +286,67 @@ export default function SelfEvaluation() {
   const locked = existing?.reviewStatus === 'reviewed';
   const reviewed = existing?.reviewStatus === 'reviewed';
   const pending = !!existing && !reviewed;
+
+  // 已审核：统计 + 渲染审核人对前两段（基础履职 / 提质赋分）修改过的题目
+  //   对比基准 = 员工原始自评（scores）vs 审核定稿（reviewScores），不同的题目标注出来
+  const changedCount = useMemo(() => {
+    if (!locked || isAdmin || !formDef) return 0;
+    const admin = existing?.reviewScores?.answers || {};
+    const mine = existing?.scores?.answers || {};
+    let n = 0;
+    formDef.sections
+      .filter((s) => s.title !== '履职扣分')
+      .forEach((sec) =>
+        sec.items.forEach((it) => {
+          const a = admin[it.key];
+          if (a === undefined || a === null) return;
+          const m = mine[it.key];
+          const same =
+            it.type === 'fill'
+              ? Number(a || 0) === Number(m || 0)
+              : a === m;
+          if (!same) n += 1;
+        })
+      );
+    return n;
+  }, [existing, locked, isAdmin, formDef]);
+
+  // 单题标注：本题被审核人改过 → 显示「审核人修改」+ 核定结果
+  // 仅前两部分（基础履职 / 提质赋分）标注；履职扣分段员工本来没填过，
+  // 谈不上「修改」，直接回显审核人选择的答案即可，不加任何提示
+  const renderReviewChange = (sec, it) => {
+    if (!locked || isAdmin || sec.title === '履职扣分') return null;
+    const adminV = existing?.reviewScores?.answers?.[it.key];
+    if (adminV === undefined || adminV === null) return null;
+    const myV = existing?.scores?.answers?.[it.key];
+    // 填空题兼容 {count, reason} 与老形状（直接数字）
+    const adminCnt = Number(adminV?.count ?? adminV) || 0;
+    const myCnt = Number(myV?.count ?? myV) || 0;
+    const same =
+      it.type === 'fill' ? adminCnt === myCnt : adminV === myV;
+    if (same) return null;
+    if (it.type === 'fill') {
+      // 表单框内已是审核人核定的 count；标签额外显示"原提交 → 核定"对比，方便员工核对
+      return (
+        <div style={{ marginTop: 6, fontSize: 13 }}>
+          <Tag color="orange" icon={<AuditOutlined />}>
+            审核人已核定
+          </Tag>
+          <span className="muted">
+            您原提交 <b>{myCnt}{it.unit || ''}</b> → 核定 <b style={{ color: '#d46b08' }}>{adminCnt}{it.unit || ''}</b>
+          </span>
+        </div>
+      );
+    }
+    const label = it.options?.find((o) => o.value === adminV)?.label || adminV;
+    return (
+      <div style={{ marginTop: 6, fontSize: 13 }}>
+        <Tag color="orange" icon={<AuditOutlined />}>审核人修改</Tag>
+        <span className="muted">核定结果：</span>
+        <span style={{ fontWeight: 600 }}>{label}</span>
+      </div>
+    );
+  };
 
   return (
     <div>
@@ -278,7 +395,11 @@ export default function SelfEvaluation() {
           icon={<TrophyOutlined />}
           style={{ marginBottom: 16 }}
           message={`本次自评已由 ${existing.reviewerName || '审核人'} 完成，最终审核分为 ${existing.reviewScore} 分`}
-          description="自评内容已锁定，不可再修改。如需复核请联系所属支部管理员。"
+          description={
+            changedCount > 0
+              ? `自评内容已锁定，不可再修改。审核人修改了 ${changedCount} 处选项，对应题目已标注「审核人修改」；履职扣分见下方红色卡片。如需复核请联系所属支部管理员。`
+              : '自评内容已锁定，不可再修改。如需复核请联系所属支部管理员。'
+          }
         />
       )}
 
@@ -288,15 +409,37 @@ export default function SelfEvaluation() {
             {/* 基本信息已移至「个人信息」页（点击顶栏右上角姓名进入） */}
             {formDef ? (
               // 岗位专属表单：选择题模式，选项后直接标注分值
-              // 非管理员不显示「履职扣分」段（扣分由管理员在审核页录入）
+              // 非管理员平时不显示「履职扣分」段（扣分由管理员在审核页录入）；
+              // 已审核后展示该段（表单整体 disabled → 只读），回显审核人填写的答案
               formDef.sections
-                .filter((sec) => isAdmin || sec.title !== '履职扣分')
-                .map((sec) => (
+                .filter(
+                  (sec) => isAdmin || sec.title !== '履职扣分' || locked
+                )
+                .map((sec) => {
+                  const isDeduct = sec.title === '履职扣分';
+                  return (
                 <Card
                   key={sec.title}
-                  title={sec.title}
-                  style={{ marginTop: 16 }}
+                  title={
+                    isDeduct && !isAdmin ? (
+                      <Space>
+                        <MinusCircleOutlined style={{ color: '#cf1322' }} />
+                        <span>履职扣分（审核人填写）</span>
+                      </Space>
+                    ) : (
+                      sec.title
+                    )
+                  }
+                  style={{
+                    marginTop: 16,
+                    borderColor: isDeduct && !isAdmin ? '#ffa39e' : undefined,
+                  }}
                 >
+                  {isDeduct && !isAdmin && (
+                    <div className="muted" style={{ marginBottom: 16, fontSize: 12 }}>
+                      以下为审核人完成审核时填写的履职扣分记录，仅供参考，不可修改。
+                    </div>
+                  )}
                   {sec.items.map((it, idx) => (
                     <div
                       key={it.key}
@@ -311,42 +454,57 @@ export default function SelfEvaluation() {
                         )}
                       </div>
                       {it.type === 'fill' ? (
-                        <Form.Item
-                          name={['answers', it.key]}
-                          rules={[
-                            { required: true, message: '请输入数量' },
-                            { type: 'number', min: 0, max: 30, message: '请输入 0-30 的整数' },
-                          ]}
-                          style={{ marginBottom: 0 }}
-                        >
-                          <InputNumber
-                            min={0}
-                            max={30}
-                            step={1}
-                            precision={0}
-                            keyboard={false}
-                            style={{ width: 240 }}
-                            placeholder="请输入数量"
-                            addonAfter={it.unit}
-                            parser={(v) => (v === '' || /^\d+$/.test(v) ? v : '')}
-                            onKeyDown={(e) => {
-                              // 允许：编辑键 + 数字 0-9；其它字母/符号一律拦截在输入之前
-                              if (e.ctrlKey || e.metaKey || e.altKey) return; // 保留复制粘贴等组合键
-                              const allowed = new Set([
-                                'Backspace', 'Delete', 'Tab', 'Enter',
-                                'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
-                                'Home', 'End',
-                              ]);
-                              if (allowed.has(e.key)) return;
-                              if (/^[0-9]$/.test(e.key)) return;
-                              e.preventDefault();
-                            }}
-                            onPaste={(e) => {
-                              const text = (e.clipboardData || window.clipboardData)?.getData('text') || '';
-                              if (!/^\d+$/.test(text)) e.preventDefault();
-                            }}
-                          />
-                        </Form.Item>
+                        <>
+                          <Form.Item
+                            name={['answers', it.key, 'count']}
+                            rules={[
+                              { required: true, message: '请输入数量' },
+                              { type: 'number', min: 0, max: 30, message: '请输入 0-30 的整数' },
+                            ]}
+                            style={{ marginBottom: it.hasReason !== false ? 8 : 0 }}
+                          >
+                            <InputNumber
+                              min={0}
+                              max={30}
+                              step={1}
+                              precision={0}
+                              keyboard={false}
+                              style={{ width: 120 }}
+                              placeholder="请输入数量"
+                              addonAfter={it.unit}
+                              parser={(v) => (v === '' || /^\d+$/.test(v) ? v : '')}
+                              onKeyDown={(e) => {
+                                // 允许：编辑键 + 数字 0-9；其它字母/符号一律拦截在输入之前
+                                if (e.ctrlKey || e.metaKey || e.altKey) return; // 保留复制粘贴等组合键
+                                const allowed = new Set([
+                                  'Backspace', 'Delete', 'Tab', 'Enter',
+                                  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+                                  'Home', 'End',
+                                ]);
+                                if (allowed.has(e.key)) return;
+                                if (/^[0-9]$/.test(e.key)) return;
+                                e.preventDefault();
+                              }}
+                              onPaste={(e) => {
+                                const text = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+                                if (!/^\d+$/.test(text)) e.preventDefault();
+                              }}
+                            />
+                          </Form.Item>
+                          {it.hasReason !== false && (
+                            <Form.Item
+                              name={['answers', it.key, 'reason']}
+                              style={{ marginBottom: 0 }}
+                            >
+                              <Input.TextArea
+                                rows={2}
+                                maxLength={500}
+                                showCount
+                                placeholder="请说明为什么得分（选填）"
+                              />
+                            </Form.Item>
+                          )}
+                        </>
                       ) : (
                         <Form.Item
                           name={['answers', it.key]}
@@ -367,10 +525,13 @@ export default function SelfEvaluation() {
                           </Radio.Group>
                         </Form.Item>
                       )}
+                      {/* 本题被审核人改过 → 标注核定结果（履职扣分段不标注） */}
+                      {renderReviewChange(sec, it)}
                     </div>
                   ))}
                 </Card>
-              ))
+                  );
+                })
             ) : (
               <Card title="分项自评（总分 100）" style={{ marginTop: 16 }}>
                 {SCORE_DIMENSIONS.map((d) => (

@@ -3,7 +3,7 @@ import { Form, Input, Button, Typography, message, Alert, Checkbox } from 'antd'
 import { LoginOutlined } from '@ant-design/icons';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { ROLES, ROLE_META } from '../lib/constants';
+import { ADMIN_TYPE_META, homePath } from '../lib/constants';
 import { isMockMode } from '../lib/cloudbase';
 
 const { Title, Text } = Typography;
@@ -61,9 +61,8 @@ export default function Login() {
         password: remember ? values.password : '',
         remember,
       });
-      message.success(`欢迎，${u.name}（${ROLE_META[u.role]?.text || ''}）`);
-      const redirect =
-        loc.state?.from || (u.role === ROLES.ADMIN ? '/review' : '/self');
+      message.success(`欢迎，${u.name}（${ADMIN_TYPE_META[u.adminType]?.text || ''}）`);
+      const redirect = loc.state?.from || homePath(u);
       nav(redirect, { replace: true });
     } catch (e) {
       message.error(e.message || '登录失败，请稍后重试');

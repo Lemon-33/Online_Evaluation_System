@@ -27,17 +27,42 @@ export const ROLES = {
   ADMIN: 'admin',
 };
 
-// ===== 管理员类型 =====
-// 仅当 user.role === ROLES.ADMIN 时 adminType 才有意义
-//   0 = 分管领导
-//   1 = 组织委员
-// 取自 user_table.admin_type 字段（与 server/admin-whitelist.mjs 对齐）
+// ===== 身份类型（admin_type，所有人都有；不再有"管理员 / 员工"二分）=====
+//   0 = 分管领导   只审核履职贡献、不自评；岗位类型可留空
+//   1 = 组织委员   履职贡献自评 + 基础积分评价；必须填岗位类型
+//   2 = 支部书记   履职贡献审核 + 基础积分评价（范围全体）；岗位类型可留空
+//   3 = 普通党员   履职贡献自评 + 只读查看；必须填岗位类型
+// 取自 user_table.admin_type 字段；注册时由工号白名单决定
 export const ADMIN_TYPE_LEADER = 0;
 export const ADMIN_TYPE_ORGANIZER = 1;
+export const ADMIN_TYPE_SECRETARY = 2;
+export const ADMIN_TYPE_EMPLOYEE = 3;
+// 后门 / 系统管理员：仅用于 /backdoor 维护工具，不在白名单、不参与业务范围
+export const ADMIN_TYPE_SYSTEM = 9;
+
+// 兼容旧引用：ADMIN_TYPE_SUPER 即支部书记
+export const ADMIN_TYPE_SUPER = ADMIN_TYPE_SECRETARY;
 
 export const ADMIN_TYPE_META = {
-  [ADMIN_TYPE_LEADER]:    { text: '分管领导', color: 'gold' },
-  [ADMIN_TYPE_ORGANIZER]: { text: '组织委员', color: 'purple' },
+  [ADMIN_TYPE_LEADER]:    { text: '分管领导',   color: 'gold' },
+  [ADMIN_TYPE_ORGANIZER]: { text: '组织委员',   color: 'purple' },
+  [ADMIN_TYPE_SECRETARY]: { text: '支部书记',   color: 'magenta' },
+  [ADMIN_TYPE_EMPLOYEE]:  { text: '普通党员',   color: 'blue' },
+  [ADMIN_TYPE_SYSTEM]:    { text: '系统管理员', color: 'red' },
+};
+
+// 可提交「履职贡献自评」的身份：普通党员(3) + 组织委员(1)
+export const canSelfEval = (u) =>
+  !!u && (u.adminType === ADMIN_TYPE_ORGANIZER || u.adminType === ADMIN_TYPE_EMPLOYEE);
+
+// 登录后默认落地页（各身份的工作台首屏）
+export const homePath = (u) => {
+  const at = u?.adminType;
+  if (at === ADMIN_TYPE_SYSTEM) return '/backdoor';     // 系统管理员：维护工具
+  if (at === ADMIN_TYPE_LEADER) return '/review';       // 分管领导：履职积分审核
+  if (at === ADMIN_TYPE_SECRETARY) return '/review';    // 支部书记：审核（可切基础积分评价）
+  if (at === ADMIN_TYPE_ORGANIZER) return '/basic-rating';
+  return '/self';                                        // 普通党员：自评
 };
 
 export const ROLE_META = {
@@ -133,13 +158,16 @@ export const getPositionForm = (position) => POSITION_FORMS[position] || null;
 
 // 按答卷计算总分
 //   选择题：answers[it.key] = 选项 value   → 取 options[].score
-//   填空题：answers[it.key] = 数量        → 数量 × unitScore
+//   填空题：兼容两种形状
+//     - 新：{ count, reason }  → 取 count
+//     - 旧：直接一个数字        → 兼容读取
 export const calcFormTotal = (formDef, answers = {}) => {
   let total = 0;
   formDef?.sections?.forEach((sec) =>
     sec.items.forEach((it) => {
       if (it.type === 'fill') {
-        const count = Number(answers[it.key]) || 0;
+        const raw = answers[it.key];
+        const count = Number(raw?.count ?? raw) || 0;
         total += count * (it.unitScore || 0);
       } else {
         const opt = it.options?.find((o) => o.value === answers[it.key]);
