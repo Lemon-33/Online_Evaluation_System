@@ -7,31 +7,37 @@
 //        ——得分 = 数量 × unitScore
 // ----------------------------------------------------------------
 
-const y = (score) => [
+export const y = (score) => [
   { value: 'yes', label: '满足', score },
   { value: 'no',  label: '不满足', score: 0 },
 ];
-const has = (score) => [
+export const has = (score) => [
   { value: 'yes', label: '有', score },
   { value: 'no',  label: '无', score: 0 },
 ];
-const rankPro4 = () => [
+export const rankPro4 = () => [
   { value: 'r1', label: '排名第一', score: 10 },
   { value: 'r2', label: '排名第二', score: 8 },
   { value: 'r3', label: '排名第三', score: 0 },
   { value: 'r4', label: '排名第四', score: 0 },
 ];
-const rankLead3 = () => [
+export const rankLead3 = () => [
   { value: 'r1', label: '排名第一', score: 10 },
   { value: 'r2', label: '排名第二', score: 8 },
   { value: 'r3', label: '排名第三', score: 6 },
 ];
-const rankLead3_0 = () => [
+export const rankLead3_0 = () => [
   { value: 'r1', label: '排名第一', score: 10 },
   { value: 'r2', label: '排名第二', score: 8 },
   { value: 'r3', label: '排名第三', score: 0 },
   { value: 'r4', label: '排名第四', score: 0 },
 ];
+
+// 只改选项的分值 / 文案（不用整段重写 options 数组）
+//   用法：patchOptions(rankPro4(), { r1: { score: 15 }, r2: { label: '第二名（保留）' } })
+//   未出现在 patch 里的选项原样保留
+export const patchOptions = (options, patch = {}) =>
+  (options || []).map((o) => (patch[o.value] ? { ...o, ...patch[o.value] } : o));
 
 // 填空题字段（spread 到 item 上）
 //   hasReason = true 时：自评页会在数量输入框下方再渲染一个 textarea（"请说明为什么得分"），
@@ -630,34 +636,75 @@ export const POSITION_FORMS = {
 //   里已经存的老分数会和「题目页少了几道题/改了题」对不上。
 // 结构：{ 'work_id': { position, removeItemKeys?, addItems?, updateItems? } }
 // -----------------------------------------------------------------
-// 示例（先注释掉，等真用到了再解开）：
-//
-//   'W-0003': {
-//     position: 'distributionTech',  // 必须与 user_table.job 一致
-//
-//     removeItemKeys: ['q1', 'q3'],  // ① 减：去掉 q1、q3
-//
-//     updateItems: [                 // ② 改：把 q4 的题干/分值覆盖
-//       { key: 'q4', fields: { label: '本中心排名第一加 12 分', unitScore: 12 } },
-//     ],
-//
-//     addItems: [                    // ③ 增：在「提质赋分」段尾追加
-//       {
-//         sectionTitle: '提质赋分',
-//         key: 'custom1',            // 不可与现有题重复（重复会被覆盖）
-//         label: '完成中心领导交办的临时专项任务',
-//         ...fill(3, '项'),
-//       },
-//     ],
-//   },
-//
+// 可用的题目构造工具（本文件已导出，下面的配置可直接用）：
+//   fill(unitScore, unit)      填空题：{ type:'fill', unitScore, unit, hasReason:true }
+//   y(score) / has(score)      两选项选择题：[满足/不满足] / [有/无]
+//   rankPro4() / rankLead3() / rankLead3_0()
+//                              排名选择题（4 名 / 3 名 / 3 名首位 0 分）
+//   patchOptions(options, { value: { score, label } })
+//                              只改选项分值/文案，不必整段重写 options
 // 调用方式（已封装在 getPositionForm(position, workId) 里，调用方一般不用手写）：
 //   import { POSITION_FORMS, applyUserFormOverrides, USER_FORM_OVERRIDES } from './forms-data.mjs';
-//   const base = POSITION_FORMS.distributionTech;
-//   const overrides = USER_FORM_OVERRIDES['W-0003'];
-//   const final = applyUserFormOverrides(base, overrides);
+//   const final = applyUserFormOverrides(POSITION_FORMS.distributionTech, USER_FORM_OVERRIDES['W-0007']);
 // =================================================================
-export const USER_FORM_OVERRIDES = {};
+
+// ★ 已启用：下面第一条是「示例条目」，key 用的是非真实工号，
+//   所以它只演示用法、不会对任何人生效。
+//   要对某个真实员工生效 → 把 'EXAMPLE-WORK-ID' 换成他的 work_id（如 'W-0007'），
+//   并把 position 改成他注册时选的岗位即可。不再需要的人 → 整条删掉。
+export const USER_FORM_OVERRIDES = {
+  'EXAMPLE-WORK-ID': {
+    position: 'distributionTech', // 必须与 user_table.job 一致，不一致整条配置自动失效
+
+    // ① 减题：按 key 从任意段删掉（整段删光 → 该章节一起隐掉）
+    removeItemKeys: ['q1', 'q3'],
+
+    // ② 改题：按 key 浅合并覆盖字段（可只改 label，也可只改 unitScore）
+    updateItems: [
+      // 2a. 改填空题：换题干 + 换单次分值
+      {
+        key: 'q2',
+        fields: {
+          label: '牵头完成中心布置的急难险重专项任务（本岗位专有口径）',
+          unitScore: 8,
+        },
+      },
+      // 2b. 改选择题：只把「排名第一」由 10 分调成 15 分，其余选项不动
+      {
+        key: 'q4',
+        fields: { options: patchOptions(rankPro4(), { r1: { score: 15 } }) },
+      },
+    ],
+
+    // ③ 加题：sectionTitle 指定归属段（该段不存在 → 新建一段追加到末尾）
+    addItems: [
+      // 3a. 加填空题
+      {
+        sectionTitle: '提质赋分',
+        key: 'custom_fill_1', // 不可与现有题 key 重复（重复则覆盖现有题）
+        label: '完成中心领导交办的临时专项任务',
+        ...fill(3, '项'),
+      },
+      // 3b. 加选择题（渲染成单选 Radio，选项分值写进 options[].score）
+      {
+        sectionTitle: '提质赋分',
+        key: 'custom_choice_1',
+        label: '本月是否参加中心层面的技术比武并获奖',
+        options: [
+          { value: 'yes', label: '有', score: 5 },
+          { value: 'no', label: '无', score: 0 },
+        ],
+      },
+      // 3c. 加选择题（复用 y() / has() / rankPro4() 等选项构造器）
+      {
+        sectionTitle: '基础履职',
+        key: 'custom_choice_2',
+        label: '本月是否按中心要求完成全部台账归档',
+        options: y(20), // → [满足 +20 分 / 不满足 0 分]
+      },
+    ],
+  },
+};
 
 // 构造"提交时刻"的题目快照
 // ---------------------------------------------------------------
