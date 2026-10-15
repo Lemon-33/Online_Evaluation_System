@@ -616,25 +616,32 @@ export const POSITION_FORMS = {
 // 用途：让个别员工在 14 套岗位模板的基础上"个性化"题目。
 // 适用场景：同岗位大多数人共用一套模板，但有少数员工因岗位职责差异，
 //         需要增/删/改模板里的某些题。
-// 三种能力（互不影响、可同时使用）：
+// 五种能力（互不影响、可同时使用）：
 //   1) 减项 removeItemKeys: ['q1', 'q3']
 //                            按 key 从基础模板里删题
 //   2) 改项 updateItems:    [{ key: 'q4', fields: { label: '...', unitScore: 12 } }]
 //                            按 key 浅合并覆盖字段（label / unitScore / unit / hasReason / options...）
 //   3) 加项 addItems:       [{ sectionTitle, key, label, ... }]
-//                            在指定段尾追加新题；段不存在则新建一段追加到末尾
+//                            默认追加到指定段尾；加 beforeKey / afterKey 可插到某题前/后
+//   4) 题序 orderItems:     ['q2', 'custom1', 'q4']
+//                            全局优先级列表：列出的 key 按数组顺序排在前面，
+//                            未列出的跟在后面、保持原相对顺序。因为是"段内排序"，
+//                            一个数组里混写多段的 key 也各归各段，互不干扰
+//   5) 段序 orderSections:  ['提质赋分', '基础履职', '履职扣分']
+//                            同一套语义，作用于章节之间的排列顺序
 // 行为约束：
-//   - 加项 / 改项只对「之后提交」的记录生效；已存的快照（snapshot）机制保证
-//     历史记录永远按当时定义渲染，不会因后改配置而错位
+//   - 加项 / 改项 / 调序只对「之后提交」的记录生效；已存的快照（snapshot）机制
+//     保证历史记录永远按当时定义与当时顺序渲染，不会因后改配置而错位
 //   - 换岗 / 离职：从本表中删除该 work_id 即可
 //   - position 必须与 user_table.job 一致，岗位不匹配时整条配置自动失效
 //   - 整章被减光时该章节一起隐掉（applyUserFormOverrides 自动过滤 items=[] 的段）
-//   - addItems 的 key 若与现有题重复 → 后者覆盖前者（覆盖语义）；
-//     updateItems / removeItemKeys 与 addItems 不会互相打架
+//   - addItems 的 key 若与现有题重复 → 原地覆盖该题（保持原位置）；
+//     updateItems / removeItemKeys / orderItems 与 addItems 不会互相打架
 // 维护人：开发者（手改本文件 + 重新打包部署）
-// 重要约束：减项 / 改项规则必须在他开始自评之前定好，否则 evaluation 表
-//   里已经存的老分数会和「题目页少了几道题/改了题」对不上。
-// 结构：{ 'work_id': { position, removeItemKeys?, addItems?, updateItems? } }
+// 重要约束：减项 / 改项 / 调序规则必须在他开始自评之前定好，否则 evaluation 表
+//   里已经存的老分数会和「题目页少了几道题/改了题/换了顺序」对不上。
+// 结构：{ 'work_id': { position, removeItemKeys?, updateItems?,
+//                      addItems?, orderItems?, orderSections? } }
 // -----------------------------------------------------------------
 // 可用的题目构造工具（本文件已导出，下面的配置可直接用）：
 //   fill(unitScore, unit)      填空题：{ type:'fill', unitScore, unit, hasReason:true }
@@ -702,7 +709,25 @@ export const USER_FORM_OVERRIDES = {
         label: '本月是否按中心要求完成全部台账归档',
         options: y(20), // → [满足 +20 分 / 不满足 0 分]
       },
+      // 3d. 指定插入位置：插到 q4 前面
+      //     （不写 beforeKey / afterKey → 默认追加到目标段尾）
+      //     用 beforeKey/afterKey 时，目标段以「锚点题所在段」为准，sectionTitle 可省
+      {
+        sectionTitle: '提质赋分',
+        key: 'custom_fill_2',
+        label: '牵头完成上级临时布置的数据治理专项',
+        ...fill(4, '项'),
+        beforeKey: 'q4',
+      },
     ],
+
+    // ④ 题序：列出的 key 按此顺序排在前面，未列出的跟在后面（保持原相对顺序）
+    //    —— 想调整现成题的先后，只写这一行即可，完全不用动上面的 POSITION_FORMS
+    orderItems: ['q2', 'custom_fill_1', 'custom_fill_2', 'custom_choice_1'],
+
+    // ⑤ 段序：章节之间的排列顺序（同一套语义：列出的在前，未列出的在后）
+    //    —— 这里把「基础履职」挪到最后
+    orderSections: ['提质赋分', '履职扣分', '基础履职'],
   },
 };
 
@@ -817,17 +842,29 @@ export const formDefFromSnapshot = (snapshot) => {
 // ---------------------------------------------------------------
 // 入参：
 //   baseForm  - POSITION_FORMS[position] 的原始定义
-//   overrides - USER_FORM_OVERRIDES[work_id] 的配置
-//                { position, removeItemKeys?, addItems?, updateItems? }
-// 返回：合并后的 formDef（深一层浅拷贝，不会污染 POSITION_FORMS 原值）
+//   overrides - USER_FORM_OVERRIDES[work_id] 的配置：
+//     {
+//       position,                 // 必须与岗位一致，否则整条失效
+//       removeItemKeys?: [key],   // ① 减题
+//       updateItems?:    [{ key, fields }],                    // ② 改题（浅合并）
+//       addItems?:       [{ sectionTitle, key, ...,
+//                           beforeKey?, afterKey? }],          // ③ 加题（可指定插入位置）
+//       orderItems?:     [key],   // ④ 题序（全局优先级列表，段内生效）
+//       orderSections?:  [title], // ⑤ 段序（章节排列顺序）
+//     }
+// 返回：合并后的 formDef（浅拷贝，不会污染 POSITION_FORMS 原值）
 // 处理顺序（很重要）：
 //   1) 减项（按 key 从所有段删题）
 //   2) 改项（按 key 浅合并覆盖字段；label / unitScore / unit / hasReason / options...）
-//   3) 加项（按 sectionTitle 追加到目标段；段不存在则新建一段）
-//      - 若新题 key 与现有题重复：覆盖现有项（而不是追加一个重复 key）
-//   4) 过滤掉 items=[] 的空段（整章被减光时该章节一起隐掉）
+//   3) 加项（默认追加到目标段尾；可用 beforeKey / afterKey 插到指定题前/后）
+//      - 目标段判定：优先 beforeKey/afterKey 所在的那一段 → 其次 sectionTitle → 都没有则新建段
+//      - 若新题 key 与现有题重复：原地覆盖该题（保持原位置）
+//   4) 题序 orderItems：列出的 key 按数组顺序排在前面，未列出的跟在后面保持原相对顺序
+//      - 因为是"段内排序"，所以一个数组里混写多段的 key 也各归各段，互不干扰
+//   5) 过滤掉 items=[] 的空段（整章被减光时该章节一起隐掉）
+//   6) 段序 orderSections：同 orderItems 语义，作用于章节
 // 兼容性：
-//   - overrides 可省略字段（旧 schema 只有 position + removeItemKeys 也能用）
+//   - overrides 可省略任意字段（旧 schema 只有 position + removeItemKeys 也能用）
 //   - 任意中间步骤失败都会原样返回 baseForm 兜底（fail-safe）
 export const applyUserFormOverrides = (baseForm, overrides) => {
   if (!baseForm?.sections || !overrides) return baseForm;
@@ -847,31 +884,73 @@ export const applyUserFormOverrides = (baseForm, overrides) => {
         ),
     }));
 
-    // 3) 加项
+    // 3) 加项（支持 beforeKey / afterKey 指定插入位置）
     for (const add of overrides.addItems || []) {
       if (!add || !add.key) continue;
-      const { sectionTitle, ...item } = add;
-      // 冲突：替换（覆盖语义）
-      const hitIdx = sections.findIndex((s) =>
+      const { sectionTitle, beforeKey, afterKey, ...item } = add;
+
+      // 冲突：原地替换（覆盖语义）
+      const hitSec = sections.find((s) =>
         s.items.some((x) => x.key === item.key)
       );
-      if (hitIdx >= 0) {
-        sections[hitIdx].items = sections[hitIdx].items.map((x) =>
-          x.key === item.key ? item : x
-        );
+      if (hitSec) {
+        const at = hitSec.items.findIndex((x) => x.key === item.key);
+        hitSec.items[at] = item;
         continue;
       }
-      // 正常追加
-      let target = sections.find((s) => s.title === sectionTitle);
+
+      // 定位目标段：锚点题所在段 > sectionTitle 指定段 > 新建段
+      const anchor = beforeKey || afterKey;
+      const anchorSec = anchor
+        ? sections.find((s) => s.items.some((x) => x.key === anchor))
+        : null;
+      let target = anchorSec || sections.find((s) => s.title === sectionTitle);
       if (!target) {
         target = { title: sectionTitle || '（自定义）', items: [] };
         sections.push(target);
       }
-      target.items.push(item);
+
+      // 定位插入下标：默认段尾；beforeKey 插到其前，afterKey 插到其后
+      let idx = target.items.length;
+      if (beforeKey) {
+        const i = target.items.findIndex((x) => x.key === beforeKey);
+        if (i >= 0) idx = i;
+      } else if (afterKey) {
+        const i = target.items.findIndex((x) => x.key === afterKey);
+        if (i >= 0) idx = i + 1;
+      }
+      target.items.splice(idx, 0, item);
     }
 
-    // 4) 过滤空段
-    return { ...baseForm, sections: sections.filter((s) => s.items.length > 0) };
+    // 4) 题序：全局优先级列表 → 段内排序（未列出的按原相对顺序排在其后）
+    if (Array.isArray(overrides.orderItems) && overrides.orderItems.length) {
+      const rank = new Map(overrides.orderItems.map((k, i) => [k, i]));
+      const base = overrides.orderItems.length;
+      sections.forEach((sec) => {
+        sec.items = sec.items
+          .map((it, i) => ({
+            it,
+            r: rank.has(it.key) ? rank.get(it.key) : base + i,
+          }))
+          .sort((a, b) => a.r - b.r)
+          .map((x) => x.it);
+      });
+    }
+
+    // 5) 过滤空段
+    let out = sections.filter((s) => s.items.length > 0);
+
+    // 6) 段序：同 orderItems 语义，作用于章节
+    if (Array.isArray(overrides.orderSections) && overrides.orderSections.length) {
+      const rank = new Map(overrides.orderSections.map((t, i) => [t, i]));
+      const base = overrides.orderSections.length;
+      out = out
+        .map((s, i) => ({ s, r: rank.has(s.title) ? rank.get(s.title) : base + i }))
+        .sort((a, b) => a.r - b.r)
+        .map((x) => x.s);
+    }
+
+    return { ...baseForm, sections: out };
   } catch (e) {
     console.error('[applyUserFormOverrides] 合并失败，原样返回基础定义：', e);
     return baseForm;
