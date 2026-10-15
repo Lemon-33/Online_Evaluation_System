@@ -38,7 +38,7 @@ const rankLead3_0 = () => [
 //                   员工填写原因后与数量一起以 {count, reason} 形式存到 evaluation.scores.answers；
 //                   审核页会把这个 reason 作为只读字段展示，审核人可改数量但不能改 reason。
 //   单独某道题想要"不要求原因"：在 forms-data.mjs 里那一项上 spread ...fill(..., ...)，再覆盖 hasReason:false
-const fill = (unitScore, unit = '项') => ({ type: 'fill', unitScore, unit, hasReason: true });
+export const fill = (unitScore, unit = '项') => ({ type: 'fill', unitScore, unit, hasReason: true });
 
 export const POSITION_FORMS = {
   // ============== 一、专业技术岗位（4 个） ==============
@@ -605,33 +605,228 @@ export const POSITION_FORMS = {
 };
 
 // =================================================================
-// 个人减项配置（脚手架 / 暂未启用）
+// 个人表单覆盖（per work_id 级别）
 // -----------------------------------------------------------------
-// 用途：让个别员工在 14 套岗位模板的基础上"减掉"特定题目。
+// 用途：让个别员工在 14 套岗位模板的基础上"个性化"题目。
 // 适用场景：同岗位大多数人共用一套模板，但有少数员工因岗位职责差异，
-//         不需要做模板里的某几道题。
-// 行为：
-//   - 只有"减项"功能：不加项、不调分值
-//   - 减项粒度到题 key（不是章节）；整章都被减光时该章节一起隐掉
-//   - 换岗 / 离职：从本表中删除该 work_id 即可（岗位不匹配时配置自动失效）
+//         需要增/删/改模板里的某些题。
+// 三种能力（互不影响、可同时使用）：
+//   1) 减项 removeItemKeys: ['q1', 'q3']
+//                            按 key 从基础模板里删题
+//   2) 改项 updateItems:    [{ key: 'q4', fields: { label: '...', unitScore: 12 } }]
+//                            按 key 浅合并覆盖字段（label / unitScore / unit / hasReason / options...）
+//   3) 加项 addItems:       [{ sectionTitle, key, label, ... }]
+//                            在指定段尾追加新题；段不存在则新建一段追加到末尾
+// 行为约束：
+//   - 加项 / 改项只对「之后提交」的记录生效；已存的快照（snapshot）机制保证
+//     历史记录永远按当时定义渲染，不会因后改配置而错位
+//   - 换岗 / 离职：从本表中删除该 work_id 即可
+//   - position 必须与 user_table.job 一致，岗位不匹配时整条配置自动失效
+//   - 整章被减光时该章节一起隐掉（applyUserFormOverrides 自动过滤 items=[] 的段）
+//   - addItems 的 key 若与现有题重复 → 后者覆盖前者（覆盖语义）；
+//     updateItems / removeItemKeys 与 addItems 不会互相打架
 // 维护人：开发者（手改本文件 + 重新打包部署）
-// 重要约束：
-//   减项规则必须在他开始自评之前定好，否则 evaluation 表里已经存的老分数
-//   会和"题目页少了几道题"对不上。
-// 如何启用（真有人需要减项时再改）：
-//   1. 在本文件下方把这个空对象改成实际配置
-//   2. 在 src/lib/constants.js 里把 getPositionForm 改成接收 work_id 参数，
-//      并按本表过滤 removeItemKeys（函数内部从 user.workId 取值，但配置表
-//      的 key、变量命名、注释统一用 work_id）
-//   3. 在 SelfEvaluation.jsx / Review.jsx 把调用点改成
-//      getPositionForm(user.position, user.workId)
-//   4. 重新打包 + 部署 + 浏览器硬刷新
+// 重要约束：减项 / 改项规则必须在他开始自评之前定好，否则 evaluation 表
+//   里已经存的老分数会和「题目页少了几道题/改了题」对不上。
+// 结构：{ 'work_id': { position, removeItemKeys?, addItems?, updateItems? } }
 // -----------------------------------------------------------------
-// 结构：{ 'work_id': { position: '岗位 key', removeItemKeys: ['题 key', ...] } }
 // 示例（先注释掉，等真用到了再解开）：
+//
 //   'W-0003': {
 //     position: 'distributionTech',  // 必须与 user_table.job 一致
-//     removeItemKeys: ['q1', 'q3'],  // 要减掉的题 key
+//
+//     removeItemKeys: ['q1', 'q3'],  // ① 减：去掉 q1、q3
+//
+//     updateItems: [                 // ② 改：把 q4 的题干/分值覆盖
+//       { key: 'q4', fields: { label: '本中心排名第一加 12 分', unitScore: 12 } },
+//     ],
+//
+//     addItems: [                    // ③ 增：在「提质赋分」段尾追加
+//       {
+//         sectionTitle: '提质赋分',
+//         key: 'custom1',            // 不可与现有题重复（重复会被覆盖）
+//         label: '完成中心领导交办的临时专项任务',
+//         ...fill(3, '项'),
+//       },
+//     ],
 //   },
+//
+// 调用方式（已封装在 getPositionForm(position, workId) 里，调用方一般不用手写）：
+//   import { POSITION_FORMS, applyUserFormOverrides, USER_FORM_OVERRIDES } from './forms-data.mjs';
+//   const base = POSITION_FORMS.distributionTech;
+//   const overrides = USER_FORM_OVERRIDES['W-0003'];
+//   const final = applyUserFormOverrides(base, overrides);
 // =================================================================
-export const USER_FORM_EXCLUSIONS = {};
+export const USER_FORM_OVERRIDES = {};
+
+// 构造"提交时刻"的题目快照
+// ---------------------------------------------------------------
+// 用途：员工提交自评 / 审核人提交审核时，把当时的题目定义 + 用户作答
+//      一起 JSON 化存到 evaluation.scores.snapshot（或 reviewScores.snapshot）。
+// 设计目的：审计回放 —— 以后改 forms-data.mjs 不会污染历史记录。
+//   - 选择题：存 options 全集 + selected value + 当时选项的 score
+//   - 填空题：存 unit / unitScore / count / reason + 当时算出来的 score
+// 兼容：
+//   - 填空题新形状 {count, reason}  → 正常取数
+//   - 填空题老形状（直接一个数字） → 视为 count，reason=''
+//   - 选择题未选                  → selected=null, score=0
+//   - 题目定义里没有的 key         → 不进 snapshot（不污染）
+export const buildPositionFormSnapshot = (formDef, answers = {}) => {
+  const snap = {};
+  if (!formDef?.sections) return snap;
+  formDef.sections.forEach((sec) =>
+    sec.items.forEach((it) => {
+      if (it.type === 'fill') {
+        const raw = answers[it.key];
+        const count =
+          raw === undefined || raw === null
+            ? 0
+            : Number(typeof raw === 'object' ? raw.count : raw) || 0;
+        const reason =
+          raw && typeof raw === 'object' ? (raw.reason ?? '') : '';
+        const score = count * (it.unitScore || 0);
+        snap[it.key] = {
+          type: 'fill',
+          sectionTitle: sec.title,
+          label: it.label,
+          unit: it.unit,
+          unitScore: it.unitScore,
+          hasReason: it.hasReason !== false, // 缺省 true：是否渲染"请说明原因"文本框
+          count,
+          reason,
+          score,
+        };
+      } else {
+        // choice / radio
+        const selected = answers[it.key];
+        const opt = it.options?.find((o) => o.value === selected);
+        snap[it.key] = {
+          type: 'choice',
+          sectionTitle: sec.title,
+          label: it.label,
+          options: it.options?.map((o) => ({
+            value: o.value,
+            label: o.label,
+            score: o.score,
+          })),
+          selected: selected ?? null,
+          selectedLabel: opt?.label ?? null,
+          score: opt?.score ?? 0,
+        };
+      }
+    }),
+  );
+  return snap;
+};
+
+// 把落库的 snapshot 还原成 formDef 形状（{ sections: [{ title, items }] }）
+// ---------------------------------------------------------------
+// 用途：只读回显历史表单时，**按库里的题干渲染**，而不是按当前 forms-data.mjs。
+//       这样即便以后改了题目（改文字 / 加题 / 删题 / 改分值），
+//       老记录仍能原样显示"当时用户看到的题目与他的作答"。
+// 入参：evaluation.scores.snapshot 或 reviewScores.snapshot（或 rating.snapshot 不适用）
+// 返回：null（无 snapshot / 空）→ 调用方回落现场表单
+// 说明：
+//   - 按 snapshot 里 sectionTitle 首次出现的顺序分组，保持题序稳定
+//   - 填空题还原 unit / unitScore / hasReason；选择题还原 options
+//   - snapshot 没存 sectionTitle（老数据）→ 归到「（历史表单）」一段，仍能显示
+export const formDefFromSnapshot = (snapshot) => {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const order = [];
+  const bySection = new Map();
+  for (const [key, s] of Object.entries(snapshot)) {
+    if (!s || typeof s !== 'object') continue;
+    const title = s.sectionTitle || '（历史表单）';
+    if (!bySection.has(title)) {
+      bySection.set(title, []);
+      order.push(title);
+    }
+    const item =
+      s.type === 'fill'
+        ? {
+            key,
+            type: 'fill',
+            label: s.label,
+            unit: s.unit,
+            unitScore: s.unitScore,
+            hasReason: s.hasReason !== false,
+          }
+        : {
+            key,
+            label: s.label,
+            options: (s.options || []).map((o) => ({
+              value: o.value,
+              label: o.label,
+              score: o.score,
+            })),
+          };
+    bySection.get(title).push(item);
+  }
+  if (!bySection.size) return null;
+  return { sections: order.map((t) => ({ title: t, items: bySection.get(t) })) };
+};
+
+// 把 per-work_id 的覆盖规则合并到基础表单上
+// ---------------------------------------------------------------
+// 入参：
+//   baseForm  - POSITION_FORMS[position] 的原始定义
+//   overrides - USER_FORM_OVERRIDES[work_id] 的配置
+//                { position, removeItemKeys?, addItems?, updateItems? }
+// 返回：合并后的 formDef（深一层浅拷贝，不会污染 POSITION_FORMS 原值）
+// 处理顺序（很重要）：
+//   1) 减项（按 key 从所有段删题）
+//   2) 改项（按 key 浅合并覆盖字段；label / unitScore / unit / hasReason / options...）
+//   3) 加项（按 sectionTitle 追加到目标段；段不存在则新建一段）
+//      - 若新题 key 与现有题重复：覆盖现有项（而不是追加一个重复 key）
+//   4) 过滤掉 items=[] 的空段（整章被减光时该章节一起隐掉）
+// 兼容性：
+//   - overrides 可省略字段（旧 schema 只有 position + removeItemKeys 也能用）
+//   - 任意中间步骤失败都会原样返回 baseForm 兜底（fail-safe）
+export const applyUserFormOverrides = (baseForm, overrides) => {
+  if (!baseForm?.sections || !overrides) return baseForm;
+  try {
+    const removeSet = new Set(overrides.removeItemKeys || []);
+    const updateMap = new Map(
+      (overrides.updateItems || []).map((u) => [u.key, u.fields || {}])
+    );
+
+    // 1+2) 浅拷贝 sections + items，逐项减/改
+    const sections = baseForm.sections.map((sec) => ({
+      ...sec,
+      items: sec.items
+        .filter((it) => !removeSet.has(it.key))
+        .map((it) =>
+          updateMap.has(it.key) ? { ...it, ...updateMap.get(it.key) } : it
+        ),
+    }));
+
+    // 3) 加项
+    for (const add of overrides.addItems || []) {
+      if (!add || !add.key) continue;
+      const { sectionTitle, ...item } = add;
+      // 冲突：替换（覆盖语义）
+      const hitIdx = sections.findIndex((s) =>
+        s.items.some((x) => x.key === item.key)
+      );
+      if (hitIdx >= 0) {
+        sections[hitIdx].items = sections[hitIdx].items.map((x) =>
+          x.key === item.key ? item : x
+        );
+        continue;
+      }
+      // 正常追加
+      let target = sections.find((s) => s.title === sectionTitle);
+      if (!target) {
+        target = { title: sectionTitle || '（自定义）', items: [] };
+        sections.push(target);
+      }
+      target.items.push(item);
+    }
+
+    // 4) 过滤空段
+    return { ...baseForm, sections: sections.filter((s) => s.items.length > 0) };
+  } catch (e) {
+    console.error('[applyUserFormOverrides] 合并失败，原样返回基础定义：', e);
+    return baseForm;
+  }
+};

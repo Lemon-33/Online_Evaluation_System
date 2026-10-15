@@ -24,7 +24,7 @@
 export const DEDUCTION_BASE_SCORE = 60;
 
 // 仿 forms-data.mjs：在题目定义处一行内展开 fill 字段，看着更紧凑
-//   { key, label, ...fill(-10, '次', '每次扣 10 分') }
+//   { key, label, ...fill(-10, '次', '每次扣10分') }
 //        其中 fill 返回 { type:'fill', unitScore, unit, hint, min:0, max:30 }
 const fill = (unitScore, unit = '项', hint = '') => ({
   type: 'fill',
@@ -43,13 +43,13 @@ export const DEDUCTION_SECTIONS = [
         key: 'q1_1',
         label:
           '未履行正规请假手续、无故缺席「三会一课」、主题党日、组织生活会、廉洁警示教育、支部集中学习等党内组织生活',
-        ...fill(-10, '次', '每次扣 10 分'),
+        ...fill(-10, '次', '每次扣10分'),
       },
       {
         key: 'q1_2',
         label: '参加各类党内组织生活出现迟到、早退现象',
         // 规则：每次扣 3 分；当月累计 3 次及以上时每次扣 6 分（组织委员按实际折算填写）
-        ...fill(-3, '次', '每次扣 3 分；当月累计 3 次及以上时每次扣 6 分（请按规则折算填写）'),
+        ...fill(-3, '次', '每次扣3分；当月累计 3 次及以上时每次扣 6 分（请按规则折算填写，即当迟到次数大于等于3次时将次数翻倍后再填写）'),
       },
       {
         key: 'q1_3',
@@ -108,7 +108,7 @@ export const DEDUCTION_SECTIONS = [
           '存在其他违反党员基本义务、党内规章制度、支部管理要求的行为',
         // 酌情扣分：组织委员直接填「扣多少分」，unit 用「分」+ unitScore=-1 实现
         unit: '分',
-        hint: '支部根据情节轻重酌情扣 0~10 分（直接填扣分值）',
+        hint: '支部根据情节轻重酌情扣 2~10 分（直接填扣分值）',
         unitScore: -1,
         type: 'fill',
         min: 0,
@@ -123,12 +123,51 @@ export const DEDUCTION_ITEMS_FLAT = DEDUCTION_SECTIONS.flatMap((sec) =>
   sec.items.map((it) => ({ ...it, sectionTitle: sec.title }))
 );
 
+// 把落库的 rating.snapshot 还原成 formDef 形状（{ sections: [{ title, items }] }）
+// ---------------------------------------------------------------
+// 用途：只读/编辑回显历史扣分表单时，**按库里的题干渲染**，而不是按当前
+//       deduction-form.js。这样即便以后改了题目（改文字/加题/删题/改分值），
+//       老记录仍能原样显示"当时组织委员看到的题目与打分"。
+// 入参：rating.scores.snapshot
+// 返回：null（无 snapshot / 老快照缺 sectionTitle）→ 调用方回落现场定义
+export const deductionFormDefFromSnapshot = (snapshot) => {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  // 老快照（本功能上线前写入）没有 sectionTitle，无法分组 → 回落现场定义
+  const hasSection = Object.values(snapshot).some(
+    (s) => s && typeof s === 'object' && s.sectionTitle
+  );
+  if (!hasSection) return null;
+  const order = [];
+  const bySection = new Map();
+  for (const [key, s] of Object.entries(snapshot)) {
+    if (!s || typeof s !== 'object') continue;
+    const title = s.sectionTitle || '（历史表单）';
+    if (!bySection.has(title)) {
+      bySection.set(title, []);
+      order.push(title);
+    }
+    bySection.get(title).push({
+      key,
+      type: 'fill',
+      label: s.label,
+      unit: s.unit,
+      unitScore: s.unitScore,
+      hint: s.hint,
+      min: s.min ?? 0,
+      max: s.max ?? 30,
+    });
+  }
+  if (!bySection.size) return null;
+  return { sections: order.map((t) => ({ title: t, items: bySection.get(t) })) };
+};
+
 // 计算累加得分（通常为 ≤ 0）：
 //   answers[it.key] = 数字（组织委员填的非负整数 / 扣分值）
 //   结果 = Σ (count × unitScore)
-export const calcNetScoreDelta = (answers = {}) => {
+// items：题集（默认当前定义）；传 snapshot 还原的题集 → 按历史分值计算
+export const calcNetScoreDelta = (answers = {}, items = DEDUCTION_ITEMS_FLAT) => {
   let total = 0;
-  for (const it of DEDUCTION_ITEMS_FLAT) {
+  for (const it of items) {
     const v = answers[it.key];
     if (v === undefined || v === null || v === '') continue;
     const n = Number(v);
@@ -139,9 +178,9 @@ export const calcNetScoreDelta = (answers = {}) => {
 };
 
 // 总扣分（始终为正数或在 0..60）：60 减去「最终得分」的反向表述
-export const calcTotalDeduction = (answers = {}) =>
-  Math.max(0, -calcNetScoreDelta(answers));
+export const calcTotalDeduction = (answers = {}, items = DEDUCTION_ITEMS_FLAT) =>
+  Math.max(0, -calcNetScoreDelta(answers, items));
 
 // 最终得分：基础分 + 累加得分（≤ 0），最低 0
-export const calcFinalScore = (answers = {}) =>
-  Math.max(0, DEDUCTION_BASE_SCORE + calcNetScoreDelta(answers));
+export const calcFinalScore = (answers = {}, items = DEDUCTION_ITEMS_FLAT) =>
+  Math.max(0, DEDUCTION_BASE_SCORE + calcNetScoreDelta(answers, items));

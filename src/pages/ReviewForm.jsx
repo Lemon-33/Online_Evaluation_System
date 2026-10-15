@@ -33,6 +33,8 @@ import {
   calcGrade,
   calcFormTotal,
   getPositionForm,
+  buildPositionFormSnapshot,
+  formDefFromSnapshot,
   POSITION_TYPES,
   findLabel,
   findPositionLabel,
@@ -62,6 +64,9 @@ export default function ReviewForm() {
   const [rec, setRec] = useState(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  // 实际用于渲染的表单定义：优先用库里的 snapshot 还原「历史题干」
+  //   （保证审核人看到的题目 = 员工自评时看到的题目，改题后也不错位）
+  const [renderFormDef, setRenderFormDef] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -69,7 +74,12 @@ export default function ReviewForm() {
       const r = await getEvaluationById(id);
       setRec(r);
       if (!r) return;
-      const fd = getPositionForm(r.position);
+      // 表单元定义来源：snapshot（有）优先，否则当前 forms-data.mjs
+      const fdSnapshot = formDefFromSnapshot(
+        r.reviewScores?.snapshot || r.scores?.snapshot,
+      );
+      const fd = fdSnapshot || getPositionForm(r.position, r.work_id);
+      setRenderFormDef(fd);
       if (fd) {
         // 回显基准：重审时优先上一次审核定稿答案，否则用员工原始自评；
         // 履职扣分的填空题员工未作答 → 默认 {count:0, reason:''}（= 不扣分）
@@ -113,7 +123,8 @@ export default function ReviewForm() {
   }, [id]);
 
   // 被审核人岗位对应的专属表单（无则回落通用 5 项）
-  const formDef = rec ? getPositionForm(rec.position) : null;
+  //   优先用 snapshot 还原的历史题干（renderFormDef），保证与员工看到的题一致
+  const formDef = rec ? renderFormDef || getPositionForm(rec.position, rec.work_id) : null;
   const watchedAnswers = Form.useWatch('answers', form) || {};
   const watchedScores = Form.useWatch('scores', form) || {};
 
@@ -206,7 +217,9 @@ export default function ReviewForm() {
         ? calcFormTotal(formDef, values.answers)
         : calcTotal(values.scores);
       await reviewEvaluation(rec.id, {
-        scores: formDef ? { answers: values.answers } : values.scores,
+        scores: formDef
+          ? { answers: values.answers, snapshot: buildPositionFormSnapshot(formDef, values.answers) }
+          : values.scores,
         reviewScore,
         reviewComment: values.reviewComment || '',
         reviewerName: user?.name || '审核人', // 仅 mock 模式生效；真实接口由服务端从 token 绑定

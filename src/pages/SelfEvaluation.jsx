@@ -34,6 +34,8 @@ import {
   calcGrade,
   calcFormTotal,
   getPositionForm,
+  buildPositionFormSnapshot,
+  formDefFromSnapshot,
   POSITION_TYPES,
   findLabel,
   findPositionLabel,
@@ -53,6 +55,10 @@ export default function SelfEvaluation() {
   const [submitting, setSubmitting] = useState(false);
   const [scores, setScores] = useState({});
   const [loaded, setLoaded] = useState(false);
+  // 实际用于渲染的表单定义：
+  //   - 已审核记录 → 用库里 snapshot 还原的「历史题干」（改题后仍能原样回显）
+  //   - 未提交 / 待审核 → 用当前 forms-data.mjs（用户还在填，必须是最新题）
+  const [renderFormDef, setRenderFormDef] = useState(null);
   // 月历数据：{ [月份]: reviewStatus }，记录当年各月是否已提交
   const [monthRecords, setMonthRecords] = useState({});
 
@@ -106,6 +112,16 @@ export default function SelfEvaluation() {
         byMonth[x.month || 1] = x.reviewStatus;
       });
     setMonthRecords(byMonth);
+    // 表单定义来源：
+    //   - 已审核记录 → 优先用库里 snapshot 还原的「历史题干」（改题后仍原样回显）
+    //   - 其它情况   → 当前 forms-data.mjs（用户还在填最新题）
+    const fdLive = getPositionForm(user?.position, user?.workId);
+    const snapForRender =
+      rec?.reviewScores?.snapshot || rec?.scores?.snapshot || null;
+    const fdSnapshot =
+      rec?.reviewStatus === 'reviewed' ? formDefFromSnapshot(snapForRender) : null;
+    const fd = fdSnapshot || fdLive;
+    setRenderFormDef(fd);
     if (rec) {
       // 兼容两种历史数据：岗位表单（scores.answers）与通用 5 项（直接分值）
       // 已审核回显规则（仅展示层，后端不动）：
@@ -116,8 +132,8 @@ export default function SelfEvaluation() {
       //   - 选择题 / 通用 5 项打分：保持员工原始自评
       const userAnswers = rec.scores?.answers || {};
       const reviewAnswers = rec.reviewScores?.answers || {};
-      const answers = fillDefaults(userAnswers, formDef);
-      formDef?.sections.forEach((sec) => {
+      const answers = fillDefaults(userAnswers, fd);
+      fd?.sections.forEach((sec) => {
         const isDeduct = sec.title === '履职扣分';
         sec.items.forEach((it) => {
           const r = reviewAnswers[it.key];
@@ -147,7 +163,7 @@ export default function SelfEvaluation() {
       form.setFieldsValue({
         partyBranch: user?.branch || '',
         scores: {},
-        answers: fillDefaults({}, formDef),
+        answers: fillDefaults({}, fd),
       });
       setScores({});
     }
@@ -160,7 +176,9 @@ export default function SelfEvaluation() {
   }, [year, month, user]);
 
   // 岗位专属表单（有配置则用选择题模式，没有则走通用 5 项打分）
-  const formDef = getPositionForm(user?.position);
+  //   已审核记录走 renderFormDef（库里 snapshot 还原的历史题干）；
+  //   首次渲染 / 未加载完时回落当前表单定义。
+  const formDef = renderFormDef || getPositionForm(user?.position, user?.workId);
   const watchedScores = Form.useWatch('scores', form) || scores;
   const watchedAnswers = Form.useWatch('answers', form) || {};
   // 员工侧「自评总分」不含履职扣分（扣分由审核人填写，结果看「最终审核结果」卡片）；
@@ -235,7 +253,9 @@ export default function SelfEvaluation() {
       if (formDef) {
         // 岗位专属表单：总分按所选选项计算，只存每题的选择
         const t = calcFormTotal(formDef, values.answers || {});
-        payload.scores = { answers: values.answers || {} };
+        // 同步落库一道「题目快照」：将来改 forms-data.mjs 不污染历史（审计回放）
+        const snapshot = buildPositionFormSnapshot(formDef, values.answers || {});
+        payload.scores = { answers: values.answers || {}, snapshot };
         payload.selfTotal = t;
       }
       await submitSelfEvaluation(payload);
@@ -500,7 +520,7 @@ export default function SelfEvaluation() {
                                 rows={2}
                                 maxLength={500}
                                 showCount
-                                placeholder="请说明为什么得分（选填）"
+                                placeholder={sec.title === '履职扣分' ? '请说明为什么扣分（选填）' : '请说明为什么得分（选填）'}
                               />
                             </Form.Item>
                           )}
@@ -630,38 +650,43 @@ export default function SelfEvaluation() {
               </div>
             </Card>
 
-            <Card
-              className="score-card"
-              style={{ marginTop: 16 }}
-              title={
-                <Space>
-                  <StarFilled style={{ color: '#faad14' }} />
-                  <span>我的自评总分</span>
-                </Space>
-              }
-            >
-              <Statistic
-                value={total}
-                valueStyle={{ color: '#b71c1c', fontSize: 36 }}
-              />
-              <Divider style={{ margin: '12px 0' }} />
-              <div className="muted" style={{ fontSize: 12 }}>
-                * 提交后由管理员完成最终审核评分
-              </div>
-            </Card>
+            {/* 已审核后：隐藏「我的自评总分」和「提交」卡片（分数以「最终审核结果」卡片为准） */}
+            {!locked && (
+              <>
+                <Card
+                  className="score-card"
+                  style={{ marginTop: 16 }}
+                  title={
+                    <Space>
+                      <StarFilled style={{ color: '#faad14' }} />
+                      <span>我的自评总分</span>
+                    </Space>
+                  }
+                >
+                  <Statistic
+                    value={total}
+                    valueStyle={{ color: '#b71c1c', fontSize: 36 }}
+                  />
+                  <Divider style={{ margin: '12px 0' }} />
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    * 提交后由管理员完成最终审核评分
+                  </div>
+                </Card>
 
-            <Card title="提交" style={{ marginTop: 16 }}>
-              <Button
-                type="primary"
-                block
-                size="large"
-                loading={submitting}
-                onClick={onSubmit}
-                icon={<EditOutlined />}
-              >
-                {existing ? '更新自评' : '提交自评'}
-              </Button>
-            </Card>
+                <Card title="提交" style={{ marginTop: 16 }}>
+                  <Button
+                    type="primary"
+                    block
+                    size="large"
+                    loading={submitting}
+                    onClick={onSubmit}
+                    icon={<EditOutlined />}
+                  >
+                    {existing ? '更新自评' : '提交自评'}
+                  </Button>
+                </Card>
+              </>
+            )}
 
             {/* 已审核时：突出展示最终结果 */}
             {reviewed && (

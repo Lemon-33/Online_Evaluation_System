@@ -41,10 +41,9 @@ import {
 import dayjs from 'dayjs';
 import {
   DEDUCTION_BASE_SCORE,
-  DEDUCTION_ITEMS_FLAT,
   DEDUCTION_SECTIONS,
+  deductionFormDefFromSnapshot,
   calcFinalScore,
-  calcNetScoreDelta,
   calcTotalDeduction,
 } from '../lib/deduction-form';
 import {
@@ -125,16 +124,27 @@ export default function BasicRatingView() {
     [record]
   );
 
+  // 渲染用题集：优先库里 snapshot 还原的「历史题干」（改题后仍原样回显）；
+  //   无 snapshot（新记录 / 老快照）→ 当前 deduction-form.js
+  const sections = useMemo(
+    () => deductionFormDefFromSnapshot(record?.scores?.snapshot) || DEDUCTION_SECTIONS,
+    [record]
+  );
+  const itemsFlat = useMemo(
+    () => sections.flatMap((sec) => sec.items.map((it) => ({ ...it, sectionTitle: sec.title }))),
+    [sections]
+  );
+
   // 优先用服务端落地的统计字段；老数据或无 record 时按 answers 重算
   const totalDeduction =
     (record?.scores && typeof record.scores === 'object' && record.scores.totalDeduction) ??
-    calcTotalDeduction(answers);
+    calcTotalDeduction(answers, itemsFlat);
   const finalScore =
     record?.reviewScore != null
       ? Number(record.reviewScore)
       : record?.scores?.finalScore != null
       ? Number(record.scores.finalScore)
-      : calcFinalScore(answers);
+      : calcFinalScore(answers, itemsFlat);
 
   const isReviewed = record?.reviewStatus === 'reviewed';
   const hasDeduction = totalDeduction > 0;
@@ -232,7 +242,7 @@ export default function BasicRatingView() {
             )}
 
             {record ? (
-              <ReadOnlyDeduct answers={answers} />
+              <ReadOnlyDeduct answers={answers} sections={sections} />
             ) : (
               !isFutureMonth(year, month) && (
                 <Card>
@@ -356,7 +366,7 @@ export default function BasicRatingView() {
 
 // 只读扣分问卷：题目 + 审核人填的次数/扣分值 + 该题贡献的扣分；
 // 没有扣分的题目淡灰显示，>0 的题目红色高亮
-function ReadOnlyDeduct({ answers }) {
+function ReadOnlyDeduct({ answers, sections = DEDUCTION_SECTIONS }) {
   const perItemDeduction = (it) => {
     const v = answers?.[it.key];
     if (v === undefined || v === null || v === '') return 0;
@@ -366,7 +376,7 @@ function ReadOnlyDeduct({ answers }) {
   };
   return (
     <>
-      {DEDUCTION_SECTIONS.map((sec) => (
+      {sections.map((sec) => (
         <Card
           key={sec.title}
           title={
@@ -397,9 +407,6 @@ function ReadOnlyDeduct({ answers }) {
                   {idx + 1}. {it.label}
                 </div>
                 <Space wrap size={12} align="center">
-                  <Tag color="red" style={{ fontSize: 13, padding: '2px 10px' }}>
-                    每 {it.unit} 扣 {absScore} 分
-                  </Tag>
                   <Tag color={active ? 'volcano' : 'default'} style={{ fontSize: 13 }}>
                     审核人填写：{v} {it.unit}
                   </Tag>

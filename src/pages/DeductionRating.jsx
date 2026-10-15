@@ -49,8 +49,8 @@ import {
 import dayjs from 'dayjs';
 import {
   DEDUCTION_BASE_SCORE,
-  DEDUCTION_ITEMS_FLAT,
   DEDUCTION_SECTIONS,
+  deductionFormDefFromSnapshot,
   calcFinalScore,
   calcNetScoreDelta,
   calcTotalDeduction,
@@ -124,10 +124,31 @@ export default function DeductionRating() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // 实时计算
-  const netScoreDelta = useMemo(() => calcNetScoreDelta(answers), [answers]); // 累加得分（≤ 0）
-  const totalDeduction = useMemo(() => calcTotalDeduction(answers), [answers]); // 总扣分（≥ 0）
-  const finalScore = useMemo(() => calcFinalScore(answers), [answers]); // 最终得分
+  // 渲染用题集：优先库里 snapshot 还原的「历史题干」（改题后仍原样回显）；
+  //   无 snapshot（新记录 / 老快照）→ 当前 deduction-form.js
+  const sections = useMemo(
+    () => deductionFormDefFromSnapshot(record?.scores?.snapshot) || DEDUCTION_SECTIONS,
+    [record]
+  );
+  // 拍平题集，供计分 / 提交快照使用（含 sectionTitle，便于下次还原）
+  const itemsFlat = useMemo(
+    () => sections.flatMap((sec) => sec.items.map((it) => ({ ...it, sectionTitle: sec.title }))),
+    [sections]
+  );
+
+  // 实时计算（按渲染题集的分值算，保证与所显示的历史题目一致）
+  const netScoreDelta = useMemo(
+    () => calcNetScoreDelta(answers, itemsFlat),
+    [answers, itemsFlat]
+  ); // 累加得分（≤ 0）
+  const totalDeduction = useMemo(
+    () => calcTotalDeduction(answers, itemsFlat),
+    [answers, itemsFlat]
+  ); // 总扣分（≥ 0）
+  const finalScore = useMemo(
+    () => calcFinalScore(answers, itemsFlat),
+    [answers, itemsFlat]
+  ); // 最终得分
   // 是否存在扣分：决定是否强制填写扣分原因
   const hasDeduction = totalDeduction > 0;
 
@@ -160,15 +181,19 @@ export default function DeductionRating() {
     }
     setSubmitting(true);
     try {
-      // 把每题的扣分方式构造成可读快照，便于审核回放
+      // 把每题的扣分方式构造成可读快照，便于审核回放 / 历史题干还原
       const snapshot = {};
-      DEDUCTION_ITEMS_FLAT.forEach((it) => {
+      itemsFlat.forEach((it) => {
         const v = answers[it.key];
         snapshot[it.key] = {
+          sectionTitle: it.sectionTitle,   // 分组用（供"按库里题干回显"还原）
           label: it.label,
           input: v ?? 0,           // 组织委员填的次数 / 扣分值
           unit: it.unit,           // '次' / '分'
           unitScore: it.unitScore, // 负数：每次扣多少分
+          hint: it.hint,           // 规则补充文案（如累计加倍提示）
+          min: it.min ?? 0,
+          max: it.max ?? 30,
           deduction: perItemDeduction(it), // 该题实际扣分（正数）
         };
       });
@@ -229,7 +254,7 @@ export default function DeductionRating() {
       {/* 顶部：返回 + 被评分员工信息 */}
       <Space style={{ marginBottom: 12 }}>
         <Button icon={<ArrowLeftOutlined />} onClick={() => nav('/basic-rating')}>
-          返回基础积分评价
+          返回
         </Button>
         {Object.values(answers).some((v) => Number(v) > 0) && (
           <Button onClick={clearAll} type="dashed">
@@ -243,7 +268,7 @@ export default function DeductionRating() {
           <Space>
             <FileTextOutlined style={{ color: '#b71c1c' }} />
             <span>
-              党员日常考核扣分问卷 —— {record.name}（{record.year} 年 {record.month} 月）
+              基础积分评价 —— {record.name}（{record.year} 年 {record.month} 月）
             </span>
             {isReviewed && <Tag color="green">已评分</Tag>}
             {!isReviewed && <Tag color="orange">待评分</Tag>}
@@ -272,7 +297,7 @@ export default function DeductionRating() {
               <StarFilled style={{ color: '#faad14' }} />
               <span>
                 评分规则：初始得分 <b>{DEDUCTION_BASE_SCORE}</b> 分。所有题目统一为「填空」——
-                组织委员填该项问题发生的「{DEDUCTION_SECTIONS[0].items[0].unit}」数（或酌情扣分值），
+                组织委员填该项问题发生的「{sections[0]?.items[0]?.unit || '次'}」数（或酌情扣分值），
                 系统按「次数 × 单次扣分」自动累扣，最终得分最低 0 分。
               </span>
             </Space>
@@ -283,7 +308,7 @@ export default function DeductionRating() {
       <Row gutter={16}>
         {/* 左侧：问卷 */}
         <Col span={16}>
-          {DEDUCTION_SECTIONS.map((sec) => (
+          {sections.map((sec) => (
             <Card
               key={sec.title}
               title={
@@ -298,7 +323,6 @@ export default function DeductionRating() {
                 const v = answers[it.key] ?? 0;
                 const deduction = perItemDeduction(it);
                 const active = Number(v) > 0;
-                const absScore = Math.abs(it.unitScore || 0);
                 return (
                   <div
                     key={it.key}
@@ -318,10 +342,6 @@ export default function DeductionRating() {
 
                     {/* 单次扣分说明 + 输入框 + 本题贡献扣分 */}
                     <Space wrap size={12} align="center">
-                      <Tag color="red" style={{ fontSize: 13, padding: '2px 10px' }}>
-                        每 {it.unit} 扣 {absScore} 分
-                      </Tag>
-
                       <InputNumber
                         min={it.min ?? 0}
                         max={it.max ?? 30}

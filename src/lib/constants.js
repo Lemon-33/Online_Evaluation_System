@@ -152,9 +152,23 @@ const yesNoOptions = (score) => [
 // 数据更新：编辑 src/lib/forms-data.mjs 后，前端会自动用上新数据，无需改这里
 import * as _formsData from './forms-data.mjs';
 export const POSITION_FORMS = _formsData.POSITION_FORMS;
+export const buildPositionFormSnapshot = _formsData.buildPositionFormSnapshot;
+export const formDefFromSnapshot = _formsData.formDefFromSnapshot;
+// 个人覆盖：支持按 work_id 增/删/改某岗位模板
+export const USER_FORM_OVERRIDES = _formsData.USER_FORM_OVERRIDES;
+export const fill = _formsData.fill;
+export const applyUserFormOverrides = _formsData.applyUserFormOverrides;
 
 // 取某岗位的专属表单定义（未配置返回 null，页面回落到通用表单）
-export const getPositionForm = (position) => POSITION_FORMS[position] || null;
+// workId：传入时按 USER_FORM_OVERRIDES[workId] 合并（position 不匹配则整条配置失效，
+//        返回基础定义）。不传 workId 保持向后兼容，返回原始 14 套模板。
+export const getPositionForm = (position, workId) => {
+  const base = POSITION_FORMS[position] || null;
+  if (!base || !workId) return base;
+  const overrides = USER_FORM_OVERRIDES[workId];
+  if (!overrides || overrides.position !== position) return base;
+  return applyUserFormOverrides(base, overrides);
+};
 
 // 按答卷计算总分
 //   选择题：answers[it.key] = 选项 value   → 取 options[].score
