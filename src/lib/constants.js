@@ -48,7 +48,8 @@ export const ADMIN_TYPE_META = {
   [ADMIN_TYPE_ORGANIZER]: { text: '组织委员',   color: 'purple' },
   [ADMIN_TYPE_SECRETARY]: { text: '支部书记',   color: 'magenta' },
   [ADMIN_TYPE_EMPLOYEE]:  { text: '普通党员',   color: 'blue' },
-  [ADMIN_TYPE_SYSTEM]:    { text: '系统管理员', color: 'red' },
+  // 系统管理员原本是 red（红），与「扣分 / 待处理」等警示语义撞色，改用 geekblue（深蓝）区分
+  [ADMIN_TYPE_SYSTEM]:    { text: '系统管理员', color: 'geekblue' },
 };
 
 // 可提交「履职贡献自评」的身份：普通党员(3) + 组织委员(1)
@@ -61,13 +62,14 @@ export const homePath = (u) => {
   if (at === ADMIN_TYPE_SYSTEM) return '/backdoor';     // 系统管理员：维护工具
   if (at === ADMIN_TYPE_LEADER) return '/review';       // 分管领导：履职积分审核
   if (at === ADMIN_TYPE_SECRETARY) return '/review';    // 支部书记：审核（可切基础积分评价）
-  if (at === ADMIN_TYPE_ORGANIZER) return '/basic-rating';
-  return '/self';                                        // 普通党员：自评
+  // 组织委员 / 普通党员：默认进「党员自我评价提交」（提交类工作的总入口；
+  //   从那里再进「履职贡献自评提交」/「年度专项加分提交」）
+  return '/self-center';
 };
 
 export const ROLE_META = {
   [ROLES.EMPLOYEE]: { text: '员工（党员）', color: 'blue' },
-  [ROLES.ADMIN]: { text: '管理员（支部）', color: 'red' },
+  [ROLES.ADMIN]: { text: '管理员（支部）', color: 'geekblue' },
 };
 
 // ===== 所在党支部（员工 / 管理员注册时均需选择） =====
@@ -168,6 +170,29 @@ export const getPositionForm = (position, workId) => {
   const overrides = USER_FORM_OVERRIDES[workId];
   if (!overrides || overrides.position !== position) return base;
   return applyUserFormOverrides(base, overrides);
+};
+
+// 取某人最终应使用的问卷 —— 加入「数据库个人专属问卷」这一层。
+// 优先级（从高到低）：
+//   ① 已审核记录的历史快照 snapshot —— 由调用方单独处理，不走本函数
+//   ② 数据库 form_override（/backdoor「个人问卷维护」定制的整份问卷）← overrideRecord
+//   ③ 代码版 USER_FORM_OVERRIDES（forms-data.mjs 手改）  ┐ 由 getPositionForm 处理
+//   ④ 14 套岗位基础模板                                   ┘
+// 参数：
+//   position      员工当前岗位 key
+//   workId        员工工号
+//   overrideRecord GET /api/form-overrides/:workId 的 data（可为 null）
+// 失效（fail-safe）：position 与库里记录不一致（换岗）→ 跳过库里那份，回落基础模板
+export const resolveFormDef = (position, workId, overrideRecord) => {
+  const dbFormDef = overrideRecord?.formDef;
+  if (
+    dbFormDef?.sections?.length &&
+    overrideRecord.position &&
+    overrideRecord.position === position
+  ) {
+    return dbFormDef;
+  }
+  return getPositionForm(position, workId);
 };
 
 // 按答卷计算总分

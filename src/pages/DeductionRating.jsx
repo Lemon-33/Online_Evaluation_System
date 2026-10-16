@@ -13,10 +13,11 @@
 //   - 最终得分 = max(0, 60 + Σ(n × unitScore))，最低 0 分
 //
 // 数据落地：
-//   - 每道题的次数/扣分值  -> rating.scores.answers（JSON）
+//   - 每道题「次数/扣分值 + 具体事由」-> rating.scores.answers（JSON）
+//       形状与履职贡献问卷的填空题一致：answers[key] = { count, reason }
 //   - 累加得分 / 总扣分    -> rating.scores.{netScoreDelta,totalDeduction}
 //   - 最终得分             -> rating.reviewScore
-//   - 扣分原因             -> rating.reviewComment（表单底部大文本框）
+//   - 整体扣分原因         -> 不再采集（原底部大文本框已取消），reviewComment 固定存空串
 
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
@@ -44,7 +45,6 @@ import {
   InfoCircleOutlined,
   MinusCircleOutlined,
   StarFilled,
-  WarningOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
@@ -54,6 +54,8 @@ import {
   calcFinalScore,
   calcNetScoreDelta,
   calcTotalDeduction,
+  fillCountOf,
+  fillReasonOf,
 } from '../lib/deduction-form';
 import {
   POSITION_TYPES,
@@ -63,6 +65,19 @@ import {
 } from '../lib/constants';
 import { listRatings, submitDeductionRating } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
+
+// 答案规范化：统一成 { count, reason }
+//   兼容老数据（answers[key] 是直接数字）与缺项（补 { count: 0, reason: '' }）
+function normalizeAnswers(raw = {}) {
+  const out = {};
+  for (const [key, v] of Object.entries(raw || {})) {
+    out[key] = {
+      count: fillCountOf(v),
+      reason: fillReasonOf(v),
+    };
+  }
+  return out;
+}
 
 export default function DeductionRating() {
   const { id } = useParams(); // rating.id（URL 最后段）
@@ -76,9 +91,12 @@ export default function DeductionRating() {
 
   const [loading, setLoading] = useState(true);
   const [record, setRecord] = useState(passedRecord || null);
-  // 每道题答案：{ [key]: 数字 }
-  const [answers, setAnswers] = useState(passedRecord?.scores?.answers || {});
-  const [reason, setReason] = useState(passedRecord?.reviewComment || '');
+  // 每道题答案：{ [key]: { count, reason } }
+  //   count  = 组织委员填的次数 / 酌情扣分值
+  //   reason = 该题具体事由（与履职贡献问卷的填空题一致，一并落库）
+  const [answers, setAnswers] = useState(() =>
+    normalizeAnswers(passedRecord?.scores?.answers)
+  );
   const [submitting, setSubmitting] = useState(false);
 
   // 加载该条 rating：优先用 router state 透传的 record；
@@ -89,9 +107,8 @@ export default function DeductionRating() {
       if (passedRecord) {
         setRecord(passedRecord);
         if (passedRecord.scores && typeof passedRecord.scores === 'object') {
-          setAnswers(passedRecord.scores.answers || {});
+          setAnswers(normalizeAnswers(passedRecord.scores.answers));
         }
-        if (passedRecord.reviewComment) setReason(passedRecord.reviewComment);
         setLoading(false);
         return;
       }
@@ -107,9 +124,8 @@ export default function DeductionRating() {
         if (!cancelled) {
           setRecord(found || null);
           if (found?.scores && typeof found.scores === 'object') {
-            setAnswers(found.scores.answers || {});
+            setAnswers(normalizeAnswers(found.scores.answers));
           }
-          if (found?.reviewComment) setReason(found.reviewComment);
         }
       } catch (e) {
         console.error(e);
@@ -126,13 +142,21 @@ export default function DeductionRating() {
 
   // 渲染用题集：优先库里 snapshot 还原的「历史题干」（改题后仍原样回显）；
   //   无 snapshot（新记录 / 老快照）→ 当前 deduction-form.js
-  const sections = useMemo(
-    () => deductionFormDefFromSnapshot(record?.scores?.snapshot) || DEDUCTION_SECTIONS,
-    [record]
-  );
+  // 注意：deductionFormDefFromSnapshot 返回的是 formDef 形状 { sections: [...] }，
+  //   与全项目约定一致（见 forms-data.mjs 的 formDefFromSnapshot），
+  //   必须取 .sections 才是「题组数组」，直接拿返回值当数组会导致 .flatMap 崩溃
+  const sections = useMemo(() => {
+    const fd = deductionFormDefFromSnapshot(record?.scores?.snapshot);
+    return Array.isArray(fd?.sections) && fd.sections.length
+      ? fd.sections
+      : DEDUCTION_SECTIONS;
+  }, [record]);
   // 拍平题集，供计分 / 提交快照使用（含 sectionTitle，便于下次还原）
   const itemsFlat = useMemo(
-    () => sections.flatMap((sec) => sec.items.map((it) => ({ ...it, sectionTitle: sec.title }))),
+    () =>
+      (Array.isArray(sections) ? sections : []).flatMap((sec) =>
+        (sec.items || []).map((it) => ({ ...it, sectionTitle: sec.title }))
+      ),
     [sections]
   );
 
@@ -149,49 +173,65 @@ export default function DeductionRating() {
     () => calcFinalScore(answers, itemsFlat),
     [answers, itemsFlat]
   ); // 最终得分
-  // 是否存在扣分：决定是否强制填写扣分原因
+  // 是否存在扣分：决定右侧提示文案（每题事由的必填校验见 missingReasonKeys）
   const hasDeduction = totalDeduction > 0;
 
   // 每道题的「贡献扣分」= 输入次数 × |unitScore|
-  const perItemDeduction = (it) => {
-    const v = answers[it.key];
-    if (v === undefined || v === null || v === '') return 0;
-    const n = Number(v);
-    if (!Number.isFinite(n)) return 0;
-    return Math.max(0, n * Math.abs(it.unitScore || 0));
-  };
+  const perItemDeduction = (it) =>
+    Math.max(0, fillCountOf(answers[it.key]) * Math.abs(it.unitScore || 0));
 
-  // 修改某一题的输入值
+  // 修改某一题的数量（保留已填的原因）
   const onFill = (key, value) => {
-    setAnswers((prev) => ({ ...prev, [key]: value ?? 0 }));
+    setAnswers((prev) => ({
+      ...prev,
+      [key]: { count: value ?? 0, reason: prev?.[key]?.reason ?? '' },
+    }));
   };
-  // 一键清零：把指定题 / 全题清零
-  const clearOne = (key) => setAnswers((prev) => ({ ...prev, [key]: 0 }));
-  const clearAll = () => setAnswers({});
+  // 修改某一题的具体事由（保留已填的数量）
+  const onReason = (key, text) => {
+    setAnswers((prev) => ({
+      ...prev,
+      [key]: { count: fillCountOf(prev?.[key]), reason: text ?? '' },
+    }));
+  };
+  // 一键清零：把指定题 / 全题清零（数量与事由一起清）
+  const clearOne = (key) =>
+    setAnswers((prev) => ({ ...prev, [key]: { count: 0, reason: '' } }));
+  const clearAll = () =>
+    setAnswers(
+      Object.fromEntries(itemsFlat.map((it) => [it.key, { count: 0, reason: '' }]))
+    );
 
-  // 提交条件：有扣分时才要求填写扣分原因（≥ 5 字）；无扣分可留空直接提交
-  const canSubmit =
-    !!record && (!hasDeduction || reason.trim().length >= 5) && !submitting;
+  // 提交条件：有扣分（填了次数）的题必须写明该题事由；无扣分可直接提交
+  const missingReasonKeys = itemsFlat
+    .filter((it) => fillCountOf(answers[it.key]) > 0 && !fillReasonOf(answers[it.key]).trim())
+    .map((it) => it.key);
+  const canSubmit = !!record && missingReasonKeys.length === 0 && !submitting;
 
   const onSubmit = async () => {
     if (!record) return;
-    if (hasDeduction && reason.trim().length < 5) {
-      message.warning('存在扣分项，请填写扣分原因（至少 5 个字）');
+    if (missingReasonKeys.length > 0) {
+      const labels = itemsFlat
+        .filter((it) => missingReasonKeys.includes(it.key))
+        .map((it) => it.label.slice(0, 12) + '…');
+      message.warning(`有 ${missingReasonKeys.length} 道题已扣分但未填写事由：${labels.join('；')}`);
       return;
     }
     setSubmitting(true);
     try {
       // 把每题的扣分方式构造成可读快照，便于审核回放 / 历史题干还原
+      //   存的就是「题干 + 填写数量 + 单位/单次分 + 事由 + 该题扣分」
       const snapshot = {};
       itemsFlat.forEach((it) => {
-        const v = answers[it.key];
+        const v = answers[it.key] || {};
         snapshot[it.key] = {
           sectionTitle: it.sectionTitle,   // 分组用（供"按库里题干回显"还原）
-          label: it.label,
-          input: v ?? 0,           // 组织委员填的次数 / 扣分值
-          unit: it.unit,           // '次' / '分'
-          unitScore: it.unitScore, // 负数：每次扣多少分
-          hint: it.hint,           // 规则补充文案（如累计加倍提示）
+          label: it.label,                 // 题干
+          input: fillCountOf(v),           // 组织委员填的次数 / 扣分值
+          reason: fillReasonOf(v),         // 该题具体事由
+          unit: it.unit,                   // '次' / '分'
+          unitScore: it.unitScore,         // 负数：每次扣多少分
+          hint: it.hint,                   // 规则补充文案（如累计加倍提示）
           min: it.min ?? 0,
           max: it.max ?? 30,
           deduction: perItemDeduction(it), // 该题实际扣分（正数）
@@ -207,7 +247,9 @@ export default function DeductionRating() {
           baseScore: DEDUCTION_BASE_SCORE,
         },
         reviewScore: finalScore,
-        reviewComment: reason.trim(),
+        // 底部「扣分原因」大文本框已取消：整体说明不再采集，
+        // 每道题的具体事由写在 scores.answers[key].reason 里，这里固定存空串
+        reviewComment: '',
         reviewerName: user?.name || '组织委员',
         // 被评分员工的工号（记录生成时已写入，此处随行携带，
         // 服务端用于兜底回填老记录的空 work_id）
@@ -256,7 +298,7 @@ export default function DeductionRating() {
         <Button icon={<ArrowLeftOutlined />} onClick={() => nav('/basic-rating')}>
           返回
         </Button>
-        {Object.values(answers).some((v) => Number(v) > 0) && (
+        {Object.values(answers).some((v) => fillCountOf(v) > 0) && (
           <Button onClick={clearAll} type="dashed">
             一键清零
           </Button>
@@ -298,7 +340,8 @@ export default function DeductionRating() {
               <span>
                 评分规则：初始得分 <b>{DEDUCTION_BASE_SCORE}</b> 分。所有题目统一为「填空」——
                 组织委员填该项问题发生的「{sections[0]?.items[0]?.unit || '次'}」数（或酌情扣分值），
-                系统按「次数 × 单次扣分」自动累扣，最终得分最低 0 分。
+                系统按「次数 × 单次扣分」自动累扣，最终得分最低 0 分。每道题下方还需填写该题的
+                <b>具体事由</b>（已扣分的题必填，与履职贡献问卷的填空题一致）。
               </span>
             </Space>
           }
@@ -311,18 +354,14 @@ export default function DeductionRating() {
           {sections.map((sec) => (
             <Card
               key={sec.title}
-              title={
-                <Space>
-                  <WarningOutlined style={{ color: '#fa541c' }} />
-                  <span>{sec.title}</span>
-                </Space>
-              }
+              title={sec.title}
               style={{ marginBottom: 16 }}
             >
               {sec.items.map((it, idx) => {
-                const v = answers[it.key] ?? 0;
+                const v = answers[it.key] || { count: 0, reason: '' };
+                const count = fillCountOf(v);
                 const deduction = perItemDeduction(it);
-                const active = Number(v) > 0;
+                const active = count > 0;
                 return (
                   <div
                     key={it.key}
@@ -347,7 +386,7 @@ export default function DeductionRating() {
                         max={it.max ?? 30}
                         step={1}
                         precision={0}
-                        value={v}
+                        value={count}
                         onChange={(val) => onFill(it.key, val ?? 0)}
                         addonAfter={it.unit}
                         style={{ width: 120 }}
@@ -396,6 +435,22 @@ export default function DeductionRating() {
                       )}
                     </Space>
 
+                    {/* 具体事由：与履职贡献问卷的填空题一致，逐题填写并落库
+                        （count > 0 时必填，替代原来底部的「扣分原因」大文本框） */}
+                    <Input.TextArea
+                      rows={2}
+                      maxLength={500}
+                      showCount
+                      style={{ marginTop: 8 }}
+                      placeholder={
+                        active
+                          ? '请填写该题扣分的具体事由（必填）'
+                          : '如本题无扣分可留空'
+                      }
+                      value={fillReasonOf(v)}
+                      onChange={(e) => onReason(it.key, e.target.value)}
+                    />
+
                     {/* 规则补充（如 1-2 累计加倍提示） */}
                     {it.hint && (
                       <div
@@ -410,23 +465,6 @@ export default function DeductionRating() {
               })}
             </Card>
           ))}
-
-          {/* 底部大文本框：扣分原因
-              （数据落地：写入 rating.reviewComment 列；无扣分可留空） */}
-          <Card title="扣分原因" style={{ marginBottom: 16 }}>
-            <Input.TextArea
-              rows={5}
-              maxLength={500}
-              showCount
-              placeholder={
-                hasDeduction
-                  ? '本次存在扣分项，请说明扣分的主要原因、涉及的具体事项（至少 5 个字）'
-                  : '当前无扣分项，可留空直接提交；也可填写备注说明'
-              }
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-            />
-          </Card>
 
           <Space>
             <Button onClick={() => nav('/basic-rating')}>取消</Button>
@@ -445,11 +483,11 @@ export default function DeductionRating() {
             ————————（以下规则仅作为代码注释保留，不在 UI 中展示）————————
             评分规则：每题按「实际 次 数 × 单次扣分」累扣，最低 0 分。
             数据落地：
-              - 每题扣分方式（次数 + 单次扣分 + 该题贡献扣分）→ rating.scores（JSON）
+              - 每题（题干 + 数量 + 具体事由 + 单次扣分 + 该题贡献扣分）→ rating.scores（JSON）
               - 最终得分                                        → rating.reviewScore
-              - 扣分原因                                        → rating.reviewComment
+              - 整体扣分原因                                     → 不采集，reviewComment = ''
               - 累加得分 / 总扣分 / 基础分                       → rating.scores 内冗余字段
-            提交校验：有扣分时扣分原因必填（≥ 5 字）；无扣分可留空。 */}
+            提交校验：已扣分的题必须填写该题具体事由；无扣分可留空。 */}
         <Col span={8}>
           <Card
             className="score-card"
@@ -489,7 +527,7 @@ export default function DeductionRating() {
             <Divider style={{ margin: '12px 0' }} />
             {hasDeduction ? (
               <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
-                本次存在扣分项，提交前需填写扣分原因（≥ 5 字）。
+                本次存在扣分项，每道已扣分的题都要填写具体事由后才能提交。
               </div>
             ) : (
               <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>

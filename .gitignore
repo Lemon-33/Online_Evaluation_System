@@ -6,6 +6,11 @@ dist
 .DS_Store
 .vite
 
+# 后端 SQLite 数据库（含全部用户与明文口令，绝不能进仓库）
+party.db
+party.db-shm
+party.db-wal
+
 # 云函数部署包（在控制台手工上传即可，不进仓库）
 *.zip
 

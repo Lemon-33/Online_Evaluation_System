@@ -351,7 +351,7 @@ export async function reviewRating(id, { reviewScore, reviewComment, reviewerNam
 // 组织委员以「扣分问卷」形式评分：
 //   scores       每题答案 + 总扣分 + 最终得分（写入 rating.scores JSON 列）
 //   reviewScore  最终得分（写入 rating.reviewScore 列）
-//   reviewComment 扣分原因（写入 rating.reviewComment 列）
+//   reviewComment 整体扣分原因（写入 rating.reviewComment 列；当前页面已取消该输入，固定传空串）
 //   work_id      被评分员工的工号（随行携带；老记录 work_id 为空时由服务端回填）
 export async function submitDeductionRating(id, payload) {
   const t = dayjs().format('YYYY-MM-DD HH:mm:ss');
@@ -379,6 +379,109 @@ export async function submitDeductionRating(id, payload) {
     body: JSON.stringify({ scores, reviewScore, reviewComment, reviewerName, work_id }),
   });
   return { id, ...patch };
+}
+
+// 本人某年度的年度红线扣分记录（只读查看自己的卷子）
+//   后端按 token 里的 work_id 强制取自己那一条，不存在时返回 null
+export async function getMyDiscipline({ year } = {}) {
+  if (USE_MOCK) return null;
+  const res = await apiRequest(`/api/disciplines/mine?year=${String(year)}`);
+  return res?.data || null;
+}
+
+// 个人偏好：读取本人侧边栏模块排序（返回 key 数组；无记录 = 用默认顺序）
+export async function getMyMenuOrder() {
+  if (USE_MOCK) return [];
+  const res = await apiRequest('/api/settings/menu-order');
+  const v = res?.data?.order;
+  return Array.isArray(v) ? v : [];
+}
+
+// 个人偏好：保存本人侧边栏模块排序（order = 菜单 key 数组）
+export async function saveMyMenuOrder(order = []) {
+  if (USE_MOCK) return order;
+  const res = await apiRequest('/api/settings/menu-order', {
+    method: 'PUT',
+    body: JSON.stringify({ order }),
+  });
+  const v = res?.data?.order;
+  return Array.isArray(v) ? v : order;
+}
+
+// 年度红线扣分列表（分管领导）
+//   year    必填（一年一人一条）
+//   status  可选：pending / reviewed
+//   keyword 可选：按姓名模糊搜索
+//   数据范围由后端强制限定为本支部（分管领导自己的 branch）
+export async function listDisciplines({ year, status, keyword } = {}) {
+  if (USE_MOCK) return [];
+  const params = { year: String(year) };
+  if (status) params.status = status;
+  if (keyword) params.keyword = keyword;
+  const qs = new URLSearchParams(params).toString();
+  const res = await apiRequest(`/api/disciplines?${qs}`);
+  return res?.data || [];
+}
+
+// 分管领导提交某条年度红线扣分（问卷形式）
+//   scores       每题「有无 + 事由」答案 + 快照 + 扣分合计（写入 discipline.scores）
+//   reviewScore  扣分合计（负数）
+//   整体扣分原因不再采集 → 后端固定写空串
+export async function submitDisciplineReview(id, { scores, reviewScore } = {}) {
+  if (USE_MOCK) return null;
+  await apiRequest(`/api/disciplines/${id}/review`, {
+    method: 'PATCH',
+    body: JSON.stringify({ scores, reviewScore }),
+  });
+  return { id, scores, reviewScore, reviewStatus: 'reviewed' };
+}
+
+// 年度专项加分审核列表（支部书记 / 分管领导）
+//   year 必传（年度口径，没有月份）；status 可选 pending / reviewed；keyword 按姓名模糊搜索
+//   后端不做惰性生成：当年没人申报就是空数组
+export async function listCredits({ year, status, keyword } = {}) {
+  if (USE_MOCK) return [];
+  const params = { year: String(year) };
+  if (status) params.status = status;
+  if (keyword) params.keyword = keyword;
+  const qs = new URLSearchParams(params).toString();
+  const res = await apiRequest(`/api/credits?${qs}`);
+  return res?.data || [];
+}
+
+// 本人某年度的专项加分申报记录（没有申报过 → null；后端不做惰性生成）
+export async function getMyCredit({ year } = {}) {
+  if (USE_MOCK) return null;
+  const res = await apiRequest(`/api/credits/mine?year=${String(year)}`);
+  return res?.data || null;
+}
+
+// 提交 / 覆盖本人的年度专项加分申报（后端按 work_id + year upsert）
+//   scores    { answers, snapshot }
+//   selfTotal 自报合计（按题面规则算出）
+export async function submitCreditApply({ year, scores, selfTotal } = {}) {
+  if (USE_MOCK) return null;
+  const res = await apiRequest('/api/credits/mine', {
+    method: 'PUT',
+    body: JSON.stringify({ year, scores, selfTotal }),
+  });
+  // 已审核 → 不允许再改
+  if (res?.code === 'ALREADY_REVIEWED')
+    throw new Error(res.message || '该年度专项加分已审核，不能修改');
+  return res?.data || null;
+}
+
+// 提交某条年度专项加分的审核结果
+//   scores        审核版答案 { answers, snapshot }（审核人在卷子上改过的内容）
+//   reviewScore   按审核版答案自动算出的核定加分（页面不再手填数字）
+//   reviewComment 审核意见
+export async function submitCreditReview(id, { scores, reviewScore, reviewComment } = {}) {
+  if (USE_MOCK) return null;
+  await apiRequest(`/api/credits/${id}/review`, {
+    method: 'PATCH',
+    body: JSON.stringify({ scores, reviewScore, reviewComment }),
+  });
+  return { id, reviewScore, reviewComment, reviewStatus: 'reviewed' };
 }
 
 // 兼容旧代码：以前 CloudBase 版本导出的 getApp，现已不再需要
@@ -441,6 +544,46 @@ export async function getMemberAnnualScores({ year, workId, name } = {}) {
   );
 }
 
+// 本人年度总排名（全单位一起排，实时算）：只回本人名次 + 参与人数 + 本人分数
+//   ranked=false → 当年缺基础积分 / 履职贡献记录，不参与排名
+export async function getMyAnnualRank({ year } = {}) {
+  if (USE_MOCK) return null;
+  const res = await apiRequest(`/api/scores/annual/rank?year=${String(year)}`);
+  return res?.data || null;
+}
+
+// 积分汇总（组织委员 / 支部书记 / 分管领导）：某个月的基础积分 / 履职贡献 / 总分
+//   branch  'all'（全体成员）| 'first' / 'second'（指定支部）| 不传（本人所在支部）
+//           组织委员只能看自己支部 —— 传了也由后端强制覆盖
+//   后端已按总分降序排好；无记录 / 未审核的模块按 0 分返回，但仍出现在列表里
+//   两个「具体事宜」字段后端返回数组：
+//     basicMatters        [{ key, label, count, unit, reason }]  数量不为 0 的扣分题
+//     contributionMatters 同上（数量不为 0 的填空题，加分/扣分都列）
+//     contributionComment 审核理由，前端作为履职贡献具体事宜的最后一点
+//   每行还带该成员所属支部 row.branch（全体模式下用于列表区分）
+export async function getBranchMonthlySummary({ year, month, branch } = {}) {
+  if (USE_MOCK) return { year, month, branch: '', rows: [] };
+  const params = new URLSearchParams();
+  params.set('year', String(year));
+  params.set('month', String(month));
+  if (branch) params.set('branch', branch);
+  const res = await apiRequest(`/api/summary/monthly?${params}`);
+  return res?.data || { year, month, branch: '', rows: [] };
+}
+
+// 支部年度积分汇总（组织委员 / 支部书记 / 分管领导）
+//   year 必传；branch 不传 = 本人支部，'all' = 全体成员
+//   口径：基础积分 / 履职贡献 = 当年有记录月份的平均分；
+//         年度专项加分 = credit.reviewScore；年度红线扣分 = discipline.reviewScore
+export async function getBranchAnnualSummary({ year, branch } = {}) {
+  if (USE_MOCK) return { year, branch: '', rows: [] };
+  const params = new URLSearchParams();
+  params.set('year', String(year));
+  if (branch) params.set('branch', branch);
+  const res = await apiRequest(`/api/summary/annual?${params}`);
+  return res?.data || { year, branch: '', rows: [] };
+}
+
 // 员工自取本人当月（或全年）基础积分记录，仅用于「基础积分评价查看」只读页
 //   - 不传 month → 当年所有月份（数组），供月历展示
 //   - 传 month   → 单月记录；无记录返回 null
@@ -452,6 +595,64 @@ export async function getMyRating({ year, month } = {}) {
   if (month !== undefined && month !== null) params.set('month', String(month));
   const res = await apiRequest(`/api/ratings/me?${params}`);
   return res?.data ?? (month ? null : []);
+}
+
+// ============================================================
+// 个人专属问卷（form_override）—— 后端 form_override 表
+// ------------------------------------------------------------
+// 用途：给某个员工单独定制一份「履职贡献」问卷（改题干 / 改选项 / 改分值 / 增删题 / 调序）。
+// UI 入口：/backdoor →「个人问卷维护」Tab（仅系统管理员；组件见 components/FormOverridePanel.jsx）
+// 生效优先级见 constants.resolveFormDef：
+//   已审核 snapshot  >  本接口的 formDef  >  forms-data.mjs 的 USER_FORM_OVERRIDES  >  基础模板
+// 注意：这类接口失败**绝不能**阻断自评 / 审核主流程，所以读取一律吞错回落。
+// ============================================================
+
+// 读取某人的个人卷子；未定制 / 无权限 / 网络异常 → null（调用方回落基础模板）
+export async function getFormOverride(workId) {
+  if (!workId) return null;
+  if (USE_MOCK) return null;
+  try {
+    const res = await apiRequest(
+      `/api/form-overrides/${encodeURIComponent(workId)}`
+    );
+    return res?.data || null;
+  } catch (e) {
+    // 401 已由 apiRequest 内部跳登录；其余（无权限 / 网络抖动）静默回落
+    console.warn('[form-override] 拉取个人卷子失败，回落基础模板：', e?.message);
+    return null;
+  }
+}
+
+// 可定制卷子的员工名单（维护页选人用）→ { list: [...], customized: [work_id] }
+export async function listFormOverrideMembers() {
+  if (USE_MOCK) return { list: [], customized: [] };
+  const res = await apiRequest('/api/form-overrides/members');
+  return res?.data || { list: [], customized: [] };
+}
+
+// 保存（新建 / 覆盖）个人卷子
+export async function saveFormOverride(workId, { position, formDef, note }) {
+  const res = await apiRequest(
+    `/api/form-overrides/${encodeURIComponent(workId)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ position, formDef, note }),
+    }
+  );
+  if (res?.code && res.code !== 'OK')
+    throw new Error(res.message || '保存失败');
+  return res?.data || null;
+}
+
+// 删除个人卷子（恢复默认：回到岗位基础模板）
+export async function deleteFormOverride(workId) {
+  const res = await apiRequest(
+    `/api/form-overrides/${encodeURIComponent(workId)}`,
+    { method: 'DELETE' }
+  );
+  if (res?.code && res.code !== 'OK')
+    throw new Error(res.message || '恢复默认失败');
+  return res?.data || null;
 }
 
 export function getApp() {

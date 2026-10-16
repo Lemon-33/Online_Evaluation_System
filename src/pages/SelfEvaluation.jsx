@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Form,
   Input,
@@ -18,6 +19,7 @@ import {
   Tooltip,
 } from 'antd';
 import {
+  ArrowLeftOutlined,
   CheckCircleOutlined,
   ExclamationCircleOutlined,
   EditOutlined,
@@ -33,24 +35,38 @@ import {
   calcTotal,
   calcGrade,
   calcFormTotal,
-  getPositionForm,
+  resolveFormDef,
   buildPositionFormSnapshot,
   formDefFromSnapshot,
   POSITION_TYPES,
   findLabel,
   findPositionLabel,
 } from '../lib/constants';
-import { getMyEvaluation, submitSelfEvaluation, listEvaluations } from '../lib/cloudbase';
+import {
+  getMyEvaluation,
+  submitSelfEvaluation,
+  listEvaluations,
+  getFormOverride,
+} from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
 
 export default function SelfEvaluation() {
   const { user } = useAuth();
+  const loc = useLocation();
+  const nav = useNavigate();
+  // 返回：从「个人积分查询 / 党员自我评价提交」进来 → 退回上一页；
+  // 直接刷新打开（没有上一步）→ 回提交类工作总入口
+  const goBack = () => (loc.key && loc.key !== 'default' ? nav(-1) : nav('/self-center'));
+  // 从「个人积分查询」的「提交 / 修改 / 查看自评」链接进来时带上所查的年月，
+  // 直接落到那个月（否则默认当前月，用户还得自己切一次）
+  const passedYear = Number(loc.state?.year) || dayjs().year();
+  const passedMonth = Number(loc.state?.month) || dayjs().month() + 1;
   // 自评页仅 admin_type∈{1,3}（普通党员 / 组织委员）使用，始终按「被评人」处理：
   // 「履职扣分」段只在已审核时回显，不做可编辑展示（故恒为 false）
   const isAdmin = false;
   const [form] = Form.useForm();
-  const [year, setYear] = useState(dayjs().year());
-  const [month, setMonth] = useState(dayjs().month() + 1);
+  const [year, setYear] = useState(passedYear);
+  const [month, setMonth] = useState(passedMonth);
   const [existing, setExisting] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [scores, setScores] = useState({});
@@ -59,6 +75,9 @@ export default function SelfEvaluation() {
   //   - 已审核记录 → 用库里 snapshot 还原的「历史题干」（改题后仍能原样回显）
   //   - 未提交 / 待审核 → 用当前 forms-data.mjs（用户还在填，必须是最新题）
   const [renderFormDef, setRenderFormDef] = useState(null);
+  // 库里「个人专属卷子」记录（GET /api/form-overrides/:workId 的 data）
+  //   null = 该员工未定制 → 回落基础模板；换岗（position 不一致）也会在 resolveFormDef 里被判失效
+  const [overrideRec, setOverrideRec] = useState(null);
   // 月历数据：{ [月份]: reviewStatus }，记录当年各月是否已提交
   const [monthRecords, setMonthRecords] = useState({});
 
@@ -112,10 +131,16 @@ export default function SelfEvaluation() {
         byMonth[x.month || 1] = x.reviewStatus;
       });
     setMonthRecords(byMonth);
-    // 表单定义来源：
-    //   - 已审核记录 → 优先用库里 snapshot 还原的「历史题干」（改题后仍原样回显）
-    //   - 其它情况   → 当前 forms-data.mjs（用户还在填最新题）
-    const fdLive = getPositionForm(user?.position, user?.workId);
+    // 表单定义来源（优先级从高到低）：
+    //   ① 已审核记录 → 库里 snapshot 还原的「历史题干」（改题后仍原样回显，永不改）
+    //   ② 库里「个人专属问卷」form_override（/backdoor「个人问卷维护」，岗位一致才生效）
+    //   ③ forms-data.mjs 的 USER_FORM_OVERRIDES（代码兜底）
+    //   ④ 14 套岗位基础模板
+    // 库里「个人专属卷子」（按 work_id 定制）优先于基础模板；
+    //   拉取失败 / 未定制 → getFormOverride 返回 null → resolveFormDef 内部自动回落
+    const ov = await getFormOverride(user?.workId);
+    setOverrideRec(ov);
+    const fdLive = resolveFormDef(user?.position, user?.workId, ov);
     const snapForRender =
       rec?.reviewScores?.snapshot || rec?.scores?.snapshot || null;
     const fdSnapshot =
@@ -178,7 +203,8 @@ export default function SelfEvaluation() {
   // 岗位专属表单（有配置则用选择题模式，没有则走通用 5 项打分）
   //   已审核记录走 renderFormDef（库里 snapshot 还原的历史题干）；
   //   首次渲染 / 未加载完时回落当前表单定义。
-  const formDef = renderFormDef || getPositionForm(user?.position, user?.workId);
+  const formDef =
+    renderFormDef || resolveFormDef(user?.position, user?.workId, overrideRec);
   const watchedScores = Form.useWatch('scores', form) || scores;
   const watchedAnswers = Form.useWatch('answers', form) || {};
   // 员工侧「自评总分」不含履职扣分（扣分由审核人填写，结果看「最终审核结果」卡片）；
@@ -252,10 +278,11 @@ export default function SelfEvaluation() {
       };
       if (formDef) {
         // 岗位专属表单：总分按所选选项计算，只存每题的选择
-        const t = calcFormTotal(formDef, values.answers || {});
+        const answers = stripEmptyFillReasons(formDef, values.answers || {});
+        const t = calcFormTotal(formDef, answers);
         // 同步落库一道「题目快照」：将来改 forms-data.mjs 不污染历史（审计回放）
-        const snapshot = buildPositionFormSnapshot(formDef, values.answers || {});
-        payload.scores = { answers: values.answers || {}, snapshot };
+        const snapshot = buildPositionFormSnapshot(formDef, answers);
+        payload.scores = { answers, snapshot };
         payload.selfTotal = t;
       }
       await submitSelfEvaluation(payload);
@@ -379,7 +406,10 @@ export default function SelfEvaluation() {
         message={
           <Space>
             <span style={{ fontWeight: 600 }}>党员自评模式</span>
-            <Tag color="blue">{user?.name}</Tag>
+            {/* 人名统一黑色显示 */}
+            <Tag color="default" style={{ color: '#000' }}>
+              {user?.name}
+            </Tag>
             <Tag color="purple">
               {findPositionLabel(user?.position)} · {findLabel(POSITION_TYPES, user?.positionType)}
             </Tag>
@@ -389,23 +419,34 @@ export default function SelfEvaluation() {
         style={{ marginBottom: 16 }}
       />
 
-      <Space style={{ marginBottom: 16 }} wrap>
-        <span>评价年度：</span>
-        <Space.Compact>
-          {years.map((y) => (
-            <Button
-              key={y}
-              type={y === year ? 'primary' : 'default'}
-              onClick={() => setYear(y)}
-            >
-              {y}
-            </Button>
-          ))}
-        </Space.Compact>
-        <span>月份在右侧月历中选择：</span>
-        {reviewed && <Tag color="green" icon={<CheckCircleOutlined />}>已审核</Tag>}
-        {pending && <Tag color="orange" icon={<ExclamationCircleOutlined />}>待审核</Tag>}
-      </Space>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+          flexWrap: 'wrap',
+          marginBottom: 16,
+        }}
+      >
+        <Space wrap>
+          <span>评价年度：</span>
+          {/* 下拉选择：年份列表是 2026 → 当前年自动生成，跨年后自动多出一年 */}
+          <Select
+            value={year}
+            onChange={setYear}
+            style={{ width: 120 }}
+            options={years.map((y) => ({ value: y, label: `${y} 年` }))}
+          />
+          <span>月份在右侧月历中选择：</span>
+          {reviewed && <Tag color="green" icon={<CheckCircleOutlined />}>已审核</Tag>}
+          {pending && <Tag color="orange" icon={<ExclamationCircleOutlined />}>待审核</Tag>}
+        </Space>
+        {/* 返回：回到进来时的那一页 */}
+        <Button icon={<ArrowLeftOutlined />} onClick={goBack}>
+          返回
+        </Button>
+      </div>
 
       {/* 锁定提示 */}
       {locked && (
@@ -474,57 +515,8 @@ export default function SelfEvaluation() {
                         )}
                       </div>
                       {it.type === 'fill' ? (
-                        <>
-                          <Form.Item
-                            name={['answers', it.key, 'count']}
-                            rules={[
-                              { required: true, message: '请输入数量' },
-                              { type: 'number', min: 0, max: 30, message: '请输入 0-30 的整数' },
-                            ]}
-                            style={{ marginBottom: it.hasReason !== false ? 8 : 0 }}
-                          >
-                            <InputNumber
-                              min={0}
-                              max={30}
-                              step={1}
-                              precision={0}
-                              keyboard={false}
-                              style={{ width: 120 }}
-                              placeholder="请输入数量"
-                              addonAfter={it.unit}
-                              parser={(v) => (v === '' || /^\d+$/.test(v) ? v : '')}
-                              onKeyDown={(e) => {
-                                // 允许：编辑键 + 数字 0-9；其它字母/符号一律拦截在输入之前
-                                if (e.ctrlKey || e.metaKey || e.altKey) return; // 保留复制粘贴等组合键
-                                const allowed = new Set([
-                                  'Backspace', 'Delete', 'Tab', 'Enter',
-                                  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
-                                  'Home', 'End',
-                                ]);
-                                if (allowed.has(e.key)) return;
-                                if (/^[0-9]$/.test(e.key)) return;
-                                e.preventDefault();
-                              }}
-                              onPaste={(e) => {
-                                const text = (e.clipboardData || window.clipboardData)?.getData('text') || '';
-                                if (!/^\d+$/.test(text)) e.preventDefault();
-                              }}
-                            />
-                          </Form.Item>
-                          {it.hasReason !== false && (
-                            <Form.Item
-                              name={['answers', it.key, 'reason']}
-                              style={{ marginBottom: 0 }}
-                            >
-                              <Input.TextArea
-                                rows={2}
-                                maxLength={500}
-                                showCount
-                                placeholder={sec.title === '履职扣分' ? '请说明为什么扣分（选填）' : '请说明为什么得分（选填）'}
-                              />
-                            </Form.Item>
-                          )}
-                        </>
+                        // 填空题：次数为 0 时不显示原因框，填了次数才出现（且必填）
+                        <FillAnswerItem it={it} isDeduct={isDeduct} />
                       ) : (
                         <Form.Item
                           name={['answers', it.key]}
@@ -743,4 +735,87 @@ export default function SelfEvaluation() {
       </Form>
     </div>
   );
+}
+
+// ============================================================
+// 填空题渲染：次数 + 具体事由
+// ------------------------------------------------------------
+// 与「年度专项加分申报」保持同一套交互：**次数为 0 时不显示原因框**，
+// 只有填了次数（> 0）才出现原因框，且此时原因**必填**（避免出现"有数量、没事由"的申报）。
+// 抽成独立组件的原因：要 Form.useWatch 实时监听该题的次数，hook 不能写在 .map 回调里。
+// ============================================================
+function FillAnswerItem({ it, isDeduct }) {
+  const form = Form.useFormInstance();
+  const watched = Form.useWatch(['answers', it.key, 'count'], form);
+  const n = Number(watched) || 0;
+  const needReason = it.hasReason !== false && n > 0;
+  return (
+    <>
+      <Form.Item
+        name={['answers', it.key, 'count']}
+        rules={[
+          { required: true, message: '请输入数量' },
+          { type: 'number', min: 0, max: 30, message: '请输入 0-30 的整数' },
+        ]}
+        style={{ marginBottom: needReason ? 8 : 0 }}
+      >
+        <InputNumber
+          min={0}
+          max={30}
+          step={1}
+          precision={0}
+          keyboard={false}
+          style={{ width: 120 }}
+          placeholder="请输入数量"
+          addonAfter={it.unit}
+          parser={(v) => (v === '' || /^\d+$/.test(v) ? v : '')}
+          onKeyDown={(e) => {
+            // 允许：编辑键 + 数字 0-9；其它字母/符号一律拦截在输入之前
+            if (e.ctrlKey || e.metaKey || e.altKey) return; // 保留复制粘贴等组合键
+            const allowed = new Set([
+              'Backspace', 'Delete', 'Tab', 'Enter',
+              'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+              'Home', 'End',
+            ]);
+            if (allowed.has(e.key)) return;
+            if (/^[0-9]$/.test(e.key)) return;
+            e.preventDefault();
+          }}
+          onPaste={(e) => {
+            const text =
+              (e.clipboardData || window.clipboardData)?.getData('text') || '';
+            if (!/^\d+$/.test(text)) e.preventDefault();
+          }}
+        />
+      </Form.Item>
+      {/* 次数 > 0 才显示原因框（次数归零时自动隐藏） */}
+      {needReason && (
+        <Form.Item
+          name={['answers', it.key, 'reason']}
+          style={{ marginBottom: 0 }}
+          rules={[{ required: true, message: '请填写具体事由' }]}
+        >
+          <Input.TextArea
+            rows={2}
+            maxLength={500}
+            showCount
+            placeholder={isDeduct ? '请说明扣分具体事由（必填）' : '请说明得分具体事由（必填）'}
+          />
+        </Form.Item>
+      )}
+    </>
+  );
+}
+
+// 提交前清理：填空题次数为 0 时，把残留的原因清空（页面已隐藏该框，避免留下脏数据）
+function stripEmptyFillReasons(formDef, answers = {}) {
+  const out = { ...answers };
+  (formDef?.sections || []).forEach((sec) =>
+    sec.items.forEach((it) => {
+      if (it.type === 'fill' && Number(out[it.key]?.count ?? 0) === 0) {
+        out[it.key] = { count: 0, reason: '' };
+      }
+    })
+  );
+  return out;
 }

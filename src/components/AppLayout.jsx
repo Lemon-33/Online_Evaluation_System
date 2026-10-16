@@ -1,80 +1,56 @@
+import { useMemo } from 'react';
 import { Layout, Menu, Dropdown, Avatar, Tag, Space } from 'antd';
-import {
-  EditOutlined,
-  AuditOutlined,
-  LogoutOutlined,
-  UserOutlined,
-  StarOutlined,
-  LineChartOutlined,
-  EyeOutlined,
-} from '@ant-design/icons';
+import { LogoutOutlined, UserOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
   ADMIN_TYPE_META,
-  ADMIN_TYPE_SECRETARY,
   ADMIN_TYPE_EMPLOYEE,
   findLabel,
   POSITION_TYPES,
   BRANCHES,
   findPositionLabel,
 } from '../lib/constants';
+import { MENU_ITEMS, sortMenuItems } from '../lib/menu';
 
 const { Header, Sider, Content } = Layout;
 
 export default function AppLayout() {
   const nav = useNavigate();
   const loc = useLocation();
-  const { user, logout, can } = useAuth();
+  const { user, logout, can, menuOrder } = useAuth();
 
-  // 侧边菜单按权限显示：
+  // 侧边菜单：定义统一在 src/lib/menu.js（新增模块只改那里）
+  // ① 按权限过滤（无权限的项不出现）
   //   员工          → 自评
   //   分管领导(0)   → 履职贡献评价审核
   //   组织委员(1)   → 基础积分评价
   //   支部书记(2)   → 同时显示「履职贡献评价审核」+「基础积分评价」两项
-  //                  （共用分管领导/组织委员的同一组页面，数据范围为全支部）
-  //                  没有「评价汇总」（list 是分管领导专有）
-  const items = [
-    can('self') && {
-      key: '/self',
-      icon: <EditOutlined />,
-      label: '每月履职贡献自评',
-    },
-    can('basicRatingView') && {
-      key: '/basic-rating-view',
-      icon: <EyeOutlined />,
-      label: '基础积分评价查看',
-    },
-    can('review') && {
-      key: '/review',
-      icon: <AuditOutlined />,
-      label: '履职贡献评价审核',
-    },
-    can('scoreQuery') && {
-      key: '/score-query',
-      icon: <LineChartOutlined />,
-      label: '个人积分查询',
-    },
-    can('basicRating') && {
-      key: '/basic-rating',
-      icon: <StarOutlined />,
-      label: '基础积分评价',
-    },
-  ].filter(Boolean);
+  //                  审核入口恒有，但审核范围不再是「全支部」：
+  //                  与其他人一样由 review_assignment 决定，刚注册时为空
+  //   注：原「评价汇总 / 导出」入口已下线（2026-10-15），路由 /list 已移除
+  // ② 再按本人保存的顺序排序（menuOrder 来自「个人信息 → 侧边栏排序」；
+  //    没排过的项 / 新增模块自动排到末尾，保持 MENU_ITEMS 里的默认顺序）
+  const items = useMemo(() => {
+    const visible = MENU_ITEMS.filter((it) => can(it.perm));
+    const ordered = sortMenuItems(visible, menuOrder);
+    return ordered.map((it) => {
+      const Icon = it.icon;
+      return { key: it.key, icon: <Icon />, label: it.label };
+    });
+  }, [can, menuOrder]);
 
   const meta = ADMIN_TYPE_META[user?.adminType] || { text: '未知', color: 'default' };
 
-  // 副标题：普通党员显示岗位；分管领导/组织委员显示所在支部；支部书记显示「可见全体」
+  // 副标题：普通党员显示岗位；其余身份显示所在支部
+  //   （支部书记不再标注「可见全体」—— 审核范围已改由 review_assignment 决定）
   const branchInfo = user?.branch ? findLabel(BRANCHES, user.branch) : '';
-  const isSecretary = user?.adminType === ADMIN_TYPE_SECRETARY;
   const isEmployee = user?.adminType === ADMIN_TYPE_EMPLOYEE;
   const subInfo = isEmployee
     ? `${findPositionLabel(user.position)} · ${findLabel(
         POSITION_TYPES,
         user.positionType
       )}${branchInfo ? ` · ${branchInfo}` : ''}`
-    : isSecretary
-    ? '可见全体'
     : branchInfo
     ? `所属：${branchInfo}`
     : '';

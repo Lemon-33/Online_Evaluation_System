@@ -87,6 +87,11 @@ export function mapUserFromDb(row) {
     role,
     adminType,
     hasReviewTargets: !!row.hasReviewTargets,
+    // 三个系统维护工具的入口开关（后端按 permission 表的授权下发，默认 false）
+    //   授权由系统管理员在 /backdoor →「权限管理」页维护
+    canUserAdmin: !!row.canUserAdmin,
+    canReviewAssign: !!row.canReviewAssign,
+    canFormOverride: !!row.canFormOverride,
     position: row.job || '',
     positionType: row.type || '',
     branch: row.branch || '',
@@ -163,6 +168,23 @@ export async function loginBackdoor({ password }) {
   return { ...result, user: mapUserFromDb(result?.user) };
 }
 
+// ---------- 对外接口：清空业务数据（危险操作，仅系统管理员）----------
+//   调 /api/backdoor/clear-data：清空库里**除超级管理员以外**的一切
+//   （员工账号 / 自评 / 评分 / 积分 / 审核关系 / 个人卷子 / 工具授权 / 会话）。
+//   ⚠️ 不可恢复。真正的权限边界在后端（requireSystemAdmin 只认 admin_type=9 + 校验清除口令），
+//   前端的「两次确认 + 一次输口令」只是防手滑的体验层，绕过它调用后端照样会被拒。
+//   password = 用户在第 3 次确认弹窗里输入的清除口令（明文发过去，后端用 scrypt 哈希比对；
+//   前端不持有也不存储这个口令的任何副本）。
+export async function clearAllData(password) {
+  if (isMockMode()) {
+    return { code: 'MOCK_MODE', message: 'Mock 模式不支持清空数据' };
+  }
+  return apiRequest('/api/backdoor/clear-data', {
+    method: 'POST',
+    body: JSON.stringify({ password: String(password ?? '') }),
+  });
+}
+
 // ---------- 对外接口：退出登录 ----------
 // 告知服务端注销会话（token 立即失效），并清掉本地 token。
 // 服务端不可达时静默失败 —— 本地 token 照样清，最多服务端会话多活几天自然过期。
@@ -174,4 +196,43 @@ export async function logoutUser() {
     /* 网络异常不阻塞登出 */
   }
   clearToken();
+}
+
+// ---------- 对外接口：忘记密码 ----------
+// 两步式自助找回（用户此时尚未登录，两个接口都是公开的）：
+//   ① recoverLookup：姓名 + 工作证编号 → 换回登录账号（第二步只作展示，不给改）
+//   ② recoverReset ：新密码 → 覆盖 user_table 里原来那行的口令，**登录名保持不变**
+// ⚠️ 不校验任何身份凭据，只要求姓名与工号能对上，详见后端 /api/recover/* 的说明。
+const normWorkIdForMatch = (v) => String(v ?? '').trim().toUpperCase();
+const findMockByWorkIdAndName = (list, workId, name) =>
+  list.find((u) => normWorkIdForMatch(u.work_id) === normWorkIdForMatch(workId) && u.name === name);
+
+export async function recoverLookup({ name, workId }) {
+  if (isMockMode()) {
+    const row = findMockByWorkIdAndName(readMock(), workId, name);
+    if (!row) return { code: 'NOT_MATCH', message: '姓名或工作证编号不正确' };
+    return { code: 'OK', data: { user_id: row.user_id, name: row.name, work_id: row.work_id } };
+  }
+  return apiRequest('/api/recover/lookup', {
+    method: 'POST',
+    body: JSON.stringify({ name, work_id: workId }),
+  });
+}
+
+export async function recoverReset({ name, workId, password }) {
+  if (isMockMode()) {
+    const list = readMock();
+    const idx = list.findIndex(
+      (u) => normWorkIdForMatch(u.work_id) === normWorkIdForMatch(workId) && u.name === name
+    );
+    if (idx < 0) return { code: 'NOT_MATCH', message: '姓名或工作证编号不正确' };
+    // 只换口令，登录名（user_id）保持原样
+    list[idx] = { ...list[idx], pw: password };
+    writeMock(list);
+    return { code: 'OK', data: { user_id: list[idx].user_id } };
+  }
+  return apiRequest('/api/recover/reset', {
+    method: 'POST',
+    body: JSON.stringify({ name, work_id: workId, pw: password }),
+  });
 }

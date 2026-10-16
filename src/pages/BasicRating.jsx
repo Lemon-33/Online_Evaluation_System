@@ -27,6 +27,7 @@ import {
   findPositionLabel,
   POSITION_TYPES,
   findBranchLabel,
+  ROLES, // 本文件 isSuperAdmin 仍在用旧 role 字段判断，必须导入（否则 ReferenceError）
 } from '../lib/constants';
 import { listRatings } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
@@ -47,9 +48,10 @@ export default function BasicRating() {
   const [pendingCount, setPendingCount] = useState(0);
   const [reviewedCount, setReviewedCount] = useState(0);
 
-  // 组织委员只负责本支部；支部书记(2) 看全体 → 不传 branch
-  const isSuperAdmin = user?.adminType === ADMIN_TYPE_SECRETARY;
-  const scopeBranch = isSuperAdmin ? undefined : user?.branch;
+  // 组织委员只负责本支部
+  // 支部书记（adminType=2）的 branch 为空 → 查全支部
+  const scopeBranch = user?.branch;
+  const isSuperAdmin = user?.role === ROLES.ADMIN && user?.adminType === 2;
 
   // 年份选项：2026 起至当前年（最近的排前面）
   const yearOptions = useMemo(() => {
@@ -102,11 +104,13 @@ export default function BasicRating() {
   };
 
 
+  // 项目规范：表格所有列（含表头）一律居中 —— align: 'center'
   const columns = [
-    { title: '姓名', dataIndex: 'name', width: 110 },
+    { title: '姓名', dataIndex: 'name', width: 110, align: 'center' },
     {
       title: '岗位 / 类型',
       width: 200,
+      align: 'center',
       render: (_, r) =>
         `${findPositionLabel(r.position)} / ${findLabel(POSITION_TYPES, r.positionType)}`,
     },
@@ -114,30 +118,35 @@ export default function BasicRating() {
       title: '月份',
       dataIndex: 'month',
       width: 70,
+      align: 'center',
       render: (v) => `${v || 1} 月`,
     },
     {
       title: '党支部',
       dataIndex: 'partyBranch',
       width: 140,
+      align: 'center',
       render: (v) => findBranchLabel(v),
     },
     {
       title: '审核分',
       dataIndex: 'reviewScore',
       width: 90,
+      align: 'center',
       render: (v) => <Tag color="blue">{v ?? 0}</Tag>,
     },
     {
       title: '状态',
       dataIndex: 'reviewStatus',
       width: 100,
+      align: 'center',
       render: (s) =>
         s === 'reviewed' ? <Tag color="green">已审核</Tag> : <Tag color="orange">待审核</Tag>,
     },
     {
       title: '操作',
       width: 120,
+      align: 'center',
       render: (_, rec) => (
         <Button type="link" onClick={() => openReview(rec)}>
           {rec.reviewStatus === 'reviewed' ? '查看 / 重审' : '评分'}
@@ -158,7 +167,10 @@ export default function BasicRating() {
             <span style={{ fontWeight: 600 }}>
               {isSuperAdmin ? '支部书记评分模式' : '组织委员基础积分评分'}
             </span>
-            <Tag color="red">{user?.name}</Tag>
+            {/* 人名统一黑色显示 */}
+            <Tag color="default" style={{ color: '#000' }}>
+              {user?.name}
+            </Tag>
             <Tag color={isSuperAdmin ? 'magenta' : 'gold'}>
               {isSuperAdmin
                 ? '可见全支部'
@@ -171,7 +183,7 @@ export default function BasicRating() {
             ? '您作为支部书记可查看所有支部的基础积分记录；编辑评分请走对应的扣分问卷页。'
             : `您负责给「${findBranchLabel(
                 scopeBranch
-              )}」的党员进行基础积分评分；组织委员权限生成的待审核记录只出现在本支部。`
+              )}」的党员进行基础积分评分。`
         }
         style={{ marginBottom: 16 }}
       />

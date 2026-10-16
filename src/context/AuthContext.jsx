@@ -7,6 +7,7 @@ import {
   ADMIN_TYPE_SYSTEM,
 } from '../lib/constants';
 import { registerUser, loginUser, loginBackdoor, logoutUser } from '../lib/userService';
+import { getMyMenuOrder } from '../lib/cloudbase';
 
 const AuthContext = createContext(null);
 
@@ -22,6 +23,10 @@ const readSession = () => {
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(readSession);
+  // 个人偏好：侧边栏模块排序（菜单 key 数组；空 = 用默认顺序）
+  //   登录后按工号拉取一次；「个人信息」页保存后会同步更新这里，
+  //   所以改完顺序侧边栏立即生效，不用刷新页面
+  const [menuOrder, setMenuOrder] = useState([]);
 
   // session 持久化：刷新页面不用重新登录
   useEffect(() => {
@@ -112,7 +117,29 @@ export function AuthProvider({ children }) {
   const logout = () => {
     logoutUser(); // 异步、不阻塞 UI（内部已做容错）
     setUser(null);
+    setMenuOrder([]);
   };
+
+  // 拉取本人侧边栏排序偏好（失败就用默认顺序，不影响登录）
+  useEffect(() => {
+    let cancelled = false;
+    const w = String(user?.workId || '').trim();
+    if (!w) {
+      setMenuOrder([]);
+      return undefined;
+    }
+    (async () => {
+      try {
+        const order = await getMyMenuOrder();
+        if (!cancelled) setMenuOrder(Array.isArray(order) ? order : []);
+      } catch {
+        if (!cancelled) setMenuOrder([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.workId]);
 
   const value = useMemo(
     () => ({
@@ -120,6 +147,8 @@ export function AuthProvider({ children }) {
       isAuthed: !!user,
       role: user?.role,
       isBackdoor: user?.adminType === ADMIN_TYPE_SYSTEM,
+      menuOrder,       // 本人侧边栏排序（key 数组）
+      setMenuOrder,    // 「个人信息」页保存后调用，侧边栏立即生效
       register,
       login,
       logout,
@@ -127,7 +156,7 @@ export function AuthProvider({ children }) {
       //   普通党员(3) → 自评 / 查看基础评分 / 个人积分查询 / [有审核对象] 履职积分审核
       //   组织委员(1) → 普通用户全部 + 基础积分评价
       //   分管领导(0) → 履职积分审核
-      //   支部书记(2) → 履职积分审核（全体）+ 基础积分评价（全体）
+      //   支部书记(2) → 履职积分审核（恒有入口，范围=被指派的人）+ 基础积分评价（全体）
       can: (action) => {
         if (!user) return false;
         const at = user.adminType;
@@ -136,23 +165,40 @@ export function AuthProvider({ children }) {
         const isSecretary = at === ADMIN_TYPE_SECRETARY;
         const isEmployee = at === ADMIN_TYPE_EMPLOYEE;
         const selfEval = isOrganizer || isEmployee; // 可提交履职贡献自评
-        // 履职积分审核入口：分管领导/支书恒有；其他人被指派了审核对象才有
+        // 履职积分审核入口：分管领导 / 支部书记恒有；其他人被指派了审核对象才有
+        //   注意「有入口」≠「有数据」：支部书记的审核范围仍完全由 review_assignment 决定，
+        //   刚注册时该表为空 → 进得去审核页，但列表是空的
         const canReview = isLeader || isSecretary || !!user.hasReviewTargets;
 
         if (action === 'self') return selfEval;
+        // 党员自我评价提交（提交类入口总页）：普通党员 / 组织委员
+        if (action === 'selfCenter') return selfEval;
         if (action === 'review') return canReview;
-        // 评价汇总 / 导出：沿用「能审核就能看汇总」
-        if (action === 'list') return canReview;
-        if (action === 'export') return canReview;
+        // 评价汇总(list) / 导出(export)：入口已于 2026-10-15 下线，恒为 false
+        //   原因：汇总口径要重做。页面 src/pages/EvaluationList.jsx 与导出逻辑
+        //   src/lib/excel.js 保留备用，路由 /list 已移除，后续接新方案时直接复用。
         if (action === 'basicRating') return isOrganizer || isSecretary;
         if (action === 'deductRating') return isOrganizer || isSecretary;
         if (action === 'scoreQuery') return selfEval;      // 个人积分查询（普通用户）
+        // 积分汇总：组织委员 / 支部书记 / 分管领导（可见范围由后端按身份限定）
+        if (action === 'scoreSummary') return isOrganizer || isSecretary || isLeader;
+        // 年度红线扣分审核：分管领导 / 支部书记（各自只审自己支部）
+        if (action === 'redline') return isLeader || isSecretary;
+        // 年度专项加分审核：分管领导 / 支部书记（数据来自 credit 表，谁申报审谁）
+        if (action === 'creditReview') return isLeader || isSecretary;
         if (action === 'basicRatingView') return selfEval; // 查看基础评分（普通用户）
+        // 系统维护工具：登录时由后端下发的标记（默认全员 false，即入口对所有账号隐藏）
+        //   授权存在后端 permission 表，由系统管理员在 /backdoor →「权限管理」页维护；
+        //   授权 / 收回后本人需重新登录一次才会刷新这些标记。
+        //   系统管理员不走这里 —— 它用独立布局的 /backdoor（内部自检 admin_type=9）
+        if (action === 'userAdmin') return !!user.canUserAdmin;       // 员工信息维护
+        if (action === 'reviewAssign') return !!user.canReviewAssign; // 审核关系维护
+        if (action === 'formOverride') return !!user.canFormOverride; // 个人问卷维护
         return false;
       },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [user]
+    [user, menuOrder]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -30,7 +30,6 @@ import {
   findLabel,
   findPositionLabel,
   findBranchLabel,
-  ADMIN_TYPE_SECRETARY,
 } from '../lib/constants';
 import { listEvaluations, getUnsubmittedCount } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
@@ -46,9 +45,9 @@ export default function Review() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate(); // 「审核」→ 整页审核表单 /review-form/:id
 
-  // 支部书记(2) 看全体 → 不传 branch；其余身份由后端按「审核对象」过滤（branch 参数被忽略）
-  const isSuperAdmin = user?.adminType === ADMIN_TYPE_SECRETARY;
-  const scopeBranch = isSuperAdmin ? undefined : user?.branch;
+  // 所有审核人（含支部书记）的范围一律由 review_assignment 决定：
+  // 支部书记不再「看全体」，刚注册时审核对象为空，需系统管理员在「审核关系维护」里指派
+  const scopeBranch = user?.branch;
 
   // 范围内的待审 / 已审核 / 未提交自评人数（不受 status 切换影响）
   const [pendingCount, setPendingCount] = useState(0);
@@ -114,11 +113,13 @@ export default function Review() {
     }
   };
 
+  // 项目规范：表格所有列（含表头）一律居中 —— align: 'center'
   const columns = [
-    { title: '姓名', dataIndex: 'name', width: 100 },
+    { title: '姓名', dataIndex: 'name', width: 100, align: 'center' },
     {
       title: '岗位 / 类型',
       width: 200,
+      align: 'center',
       render: (_, r) =>
         `${findPositionLabel(r.position)} / ${findLabel(POSITION_TYPES, r.positionType)}`,
     },
@@ -126,35 +127,41 @@ export default function Review() {
       title: '月份',
       dataIndex: 'month',
       width: 70,
+      align: 'center',
       render: (v) => `${v || 1} 月`,
     },
     {
       title: '党支部',
       dataIndex: 'partyBranch',
       width: 140,
+      align: 'center',
       render: (v) => findBranchLabel(v),
     },
     {
       title: '自评总分',
       dataIndex: 'selfTotal',
       width: 90,
+      align: 'center',
       render: (v) => <Tag color="blue">{v}</Tag>,
     },
     {
       title: '提交时间',
       dataIndex: 'createdAt',
       width: 160,
+      align: 'center',
     },
     {
       title: '状态',
       dataIndex: 'reviewStatus',
       width: 100,
+      align: 'center',
       render: (s) =>
         s === 'reviewed' ? <Tag color="green">已审核</Tag> : <Tag color="orange">待审核</Tag>,
     },
     {
       title: '操作',
       width: 120,
+      align: 'center',
       render: (_, rec) => (
         <Button type="link" onClick={() => openReview(rec)}>
           {rec.reviewStatus === 'reviewed' ? '重新审核' : '审核'}
@@ -167,26 +174,23 @@ export default function Review() {
     <div>
       {/* 审核模式 banner */}
       <Alert
-        type={isSuperAdmin ? 'error' : 'warning'}
+        type="warning"
         showIcon
         icon={<AuditOutlined />}
         message={
           <Space>
-            <span style={{ fontWeight: 600 }}>
-              {isSuperAdmin ? '支部书记审核模式' : '管理员审核模式'}
-            </span>
-            <Tag color="red">{user?.name}</Tag>
-            <Tag color={isSuperAdmin ? 'magenta' : 'gold'}>
-              {isSuperAdmin ? '可见全支部' : `负责审核：${findBranchLabel(scopeBranch)}`}
+            <span style={{ fontWeight: 600 }}>管理员审核模式</span>
+            {/* 人名统一黑色显示 */}
+            <Tag color="default" style={{ color: '#000' }}>
+              {user?.name}
             </Tag>
+            <Tag color="gold">{`负责审核：${findBranchLabel(scopeBranch)}`}</Tag>
           </Space>
         }
         description={
-          isSuperAdmin
-            ? '您作为支部书记可查看所有支部的员工自评，不受支部范围限制。'
-            : `您负责审核「${findBranchLabel(
-                scopeBranch
-              )}」的员工自评。此处仅显示该支部员工，其他支部的数据不可见。`
+          user?.hasReviewTargets
+            ? ''
+            : '当前尚未给您指派任何审核对象，请联系系统管理员'
         }
         style={{ marginBottom: 16 }}
       />

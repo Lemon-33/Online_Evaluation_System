@@ -105,9 +105,15 @@ export default function Login() {
             label="密码"
             name="password"
             rules={[{ required: true, message: '请输入密码' }]}
+            style={{ marginBottom: 4 }}
           >
             <Input.Password placeholder="登录密码" autoComplete="current-password" />
           </Form.Item>
+
+          {/* 忘记密码：贴在密码框右下角，蓝色链接（与「立即注册」同款） */}
+          <div style={{ textAlign: 'right', marginBottom: 12 }}>
+            <Link to="/forgot">忘记密码</Link>
+          </div>
 
           <Form.Item style={{ marginBottom: 12 }}>
             <Checkbox

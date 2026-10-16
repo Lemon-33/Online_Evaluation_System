@@ -8,8 +8,15 @@
 //     unitScore: -10,                           // 每发生「一单位」扣多少分（负数）
 //     unit: '次' | '项' | '分' | ...            // 计量单位
 //     hint,                                     // 提示文案
+//     hasReason: true,                          // 与履职贡献问卷一致：每题都要填「具体事由」
 //     min, max,                                 // 输入范围
 //   }
+//
+// 答案形状（与履职贡献问卷一致）：
+//   answers[key] = { count, reason }
+//     count  非负整数（次数 / 酌情扣分值）
+//     reason 该题具体事由（组织委员填写）
+//   兼容：老数据 answers[key] 是直接数字 → 按 count 读，reason 视为空
 //
 // 计分：
 //   - 初始得分 DEDUCTION_BASE_SCORE = 60
@@ -25,12 +32,14 @@ export const DEDUCTION_BASE_SCORE = 60;
 
 // 仿 forms-data.mjs：在题目定义处一行内展开 fill 字段，看着更紧凑
 //   { key, label, ...fill(-10, '次', '每次扣10分') }
-//        其中 fill 返回 { type:'fill', unitScore, unit, hint, min:0, max:30 }
+//        其中 fill 返回 { type:'fill', unitScore, unit, hint, hasReason:true, min:0, max:30 }
+//   hasReason: true = 与履职贡献问卷一致，每题下方都要填「具体事由」（存 reason）
 const fill = (unitScore, unit = '项', hint = '') => ({
   type: 'fill',
   unitScore,
   unit,
   hint,
+  hasReason: true,
   min: 0,
   max: 30,
 });
@@ -111,6 +120,7 @@ export const DEDUCTION_SECTIONS = [
         hint: '支部根据情节轻重酌情扣 2~10 分（直接填扣分值）',
         unitScore: -1,
         type: 'fill',
+        hasReason: true,
         min: 0,
         max: 10,
       },
@@ -161,8 +171,19 @@ export const deductionFormDefFromSnapshot = (snapshot) => {
   return { sections: order.map((t) => ({ title: t, items: bySection.get(t) })) };
 };
 
+// 读取某题填写的数量：兼容新形状 { count, reason } 与老形状（直接数字）
+export const fillCountOf = (v) => {
+  if (v === undefined || v === null || v === '') return 0;
+  const n = Number(typeof v === 'object' ? v.count ?? 0 : v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+// 读取某题填写的原因：老数据（直接数字）没有 reason → 空串
+export const fillReasonOf = (v) =>
+  v && typeof v === 'object' ? String(v.reason ?? '') : '';
+
 // 计算累加得分（通常为 ≤ 0）：
-//   answers[it.key] = 数字（组织委员填的非负整数 / 扣分值）
+//   answers[it.key] = { count, reason }（兼容老数据：直接数字）
 //   结果 = Σ (count × unitScore)
 // items：题集（默认当前定义）；传 snapshot 还原的题集 → 按历史分值计算
 export const calcNetScoreDelta = (answers = {}, items = DEDUCTION_ITEMS_FLAT) => {
@@ -170,7 +191,7 @@ export const calcNetScoreDelta = (answers = {}, items = DEDUCTION_ITEMS_FLAT) =>
   for (const it of items) {
     const v = answers[it.key];
     if (v === undefined || v === null || v === '') continue;
-    const n = Number(v);
+    const n = Number(typeof v === 'object' ? v.count ?? 0 : v);
     if (!Number.isFinite(n)) continue;
     total += n * (it.unitScore || 0);
   }

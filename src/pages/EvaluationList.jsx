@@ -85,11 +85,13 @@ export default function EvaluationList() {
     reload();
   };
 
+  // 项目规范：表格所有列（含表头）一律居中 —— align: 'center'
   const columns = [
-    { title: '姓名', dataIndex: 'name', width: 100 },
+    { title: '姓名', dataIndex: 'name', width: 100, align: 'center' },
     {
       title: '岗位 / 类型',
       width: 200,
+      align: 'center',
       render: (_, r) =>
         `${findPositionLabel(r.position)} / ${findLabel(POSITION_TYPES, r.positionType)}`,
     },
@@ -97,25 +99,29 @@ export default function EvaluationList() {
       title: '党支部',
       dataIndex: 'partyBranch',
       width: 140,
+      align: 'center',
       render: (v) => findBranchLabel(v),
     },
-    { title: '年度', dataIndex: 'year', width: 80 },
+    { title: '年度', dataIndex: 'year', width: 80, align: 'center' },
     {
       title: '月份',
       dataIndex: 'month',
       width: 70,
+      align: 'center',
       render: (v) => `${v || 1} 月`,
     },
     {
       title: '自评分',
       dataIndex: 'selfTotal',
       width: 90,
+      align: 'center',
       render: (v) => (v != null ? `${v}` : '-'),
     },
     {
       title: '审核分',
       dataIndex: 'reviewScore',
       width: 90,
+      align: 'center',
       render: (v, r) =>
         r.reviewStatus === 'reviewed' ? (
           <Tag color={v >= 75 ? 'green' : 'red'}>{v}</Tag>
@@ -126,6 +132,7 @@ export default function EvaluationList() {
     {
       title: '审核等级',
       width: 90,
+      align: 'center',
       render: (_, r) =>
         r.reviewStatus === 'reviewed' ? (
           <Tag>{calcGrade(r.reviewScore || 0)}</Tag>
@@ -137,14 +144,16 @@ export default function EvaluationList() {
       title: '状态',
       dataIndex: 'reviewStatus',
       width: 90,
+      align: 'center',
       render: (s) =>
         s === 'reviewed' ? <Tag color="green">已审核</Tag> : <Tag color="orange">待审核</Tag>,
     },
-    { title: '审核人', dataIndex: 'reviewerName', width: 100 },
-    { title: '提交时间', dataIndex: 'createdAt', width: 160 },
+    { title: '审核人', dataIndex: 'reviewerName', width: 100, align: 'center' },
+    { title: '提交时间', dataIndex: 'createdAt', width: 160, align: 'center' },
     {
       title: '操作',
       width: 100,
+      align: 'center',
       fixed: 'right',
       render: (_, r) =>
         can('export') && (
@@ -247,19 +256,22 @@ export default function EvaluationList() {
           if (!pageData.length) return null;
           const sumRow = (
             <Table.Summary.Row style={{ background: '#fafafa', fontWeight: 600 }}>
-              <Table.Summary.Cell index={0}>合计</Table.Summary.Cell>
-              <Table.Summary.Cell index={1} colSpan={2}>
+              {/* 合计行同样居中，与列对齐方式保持一致 */}
+              <Table.Summary.Cell index={0} align="center">
+                合计
+              </Table.Summary.Cell>
+              <Table.Summary.Cell index={1} colSpan={2} align="center">
                 {pageData.length} 人
               </Table.Summary.Cell>
               {SCORE_DIMENSIONS.map((d, i) => (
-                <Table.Summary.Cell key={d.key} index={2 + i}>
+                <Table.Summary.Cell key={d.key} index={2 + i} align="center">
                   {(
                     pageData.reduce((s, x) => s + Number(x.scores?.[d.key] || 0), 0) /
                     pageData.length
                   ).toFixed(1)}
                 </Table.Summary.Cell>
               ))}
-              <Table.Summary.Cell index={7} colSpan={3}>
+              <Table.Summary.Cell index={7} colSpan={3} align="center">
                 自评均分：
                 {(
                   pageData.reduce((s, x) => s + Number(x.selfTotal || 0), 0) /
