@@ -372,6 +372,9 @@ const reviewedByMe = (me, rec) => {
 
 // 单条记录的判定：该记录是否落在「审核关系生效之后」
 //   历史月份（早于关系建立月份）对该审核人**不可见 / 不可审**
+// 审核关系「生效起始期」放宽 1 个月：关系建立当月及**前一个月**的记录都可见 / 可审；
+//   更早的历史月份仍不可见（防止新加审核人突然看到太久以前的自评）。
+//   判定：记录月份(year*12+month) >= 关系建立月份 - 1
 const withinAssignmentPeriod = (me, rec) => {
   if (!rec?.work_id) return false;
   const row = db
@@ -379,7 +382,7 @@ const withinAssignmentPeriod = (me, rec) => {
       'SELECT created_at FROM review_assignment WHERE reviewer_work_id COLLATE NOCASE = ? AND target_work_id COLLATE NOCASE = ?'
     )
     .get(String(me?.work_id || ''), String(rec.work_id));
-  if (periodOf(rec.year, rec.month) >= assignmentFromPeriod(row?.created_at)) return true;
+  if (periodOf(rec.year, rec.month) >= assignmentFromPeriod(row?.created_at) - 1) return true;
   // 例外：**我本人审过**的历史记录始终可见 / 可审 ——
   //   管理员误删审核关系再补回来时（新行 created_at = 当时），不该丢掉我已审过的记录
   return reviewedByMe(me, rec);
@@ -399,11 +402,13 @@ const canViewEvaluation = (me, rec) => {
 };
 
 // 审核 / 删除单条 evaluation：仅限我的审核对象（本人不能审自己）
+//   注意：**不卡月份** —— 只要「在审核关系里」就放行提交审核 / 提交删除，
+//   月份生效期只用于「列表可见性」(canViewEvaluation)，不挡实际提交动作。
 const canReviewEvaluation = (me, rec) => {
   if (!me || !rec) return false;
   if (!rec.work_id) return false;
   if (!reviewTargetsOf(me.work_id).includes(rec.work_id)) return false;
-  return withinAssignmentPeriod(me, rec);
+  return true;
 };
 
 // 「我的审核状态」—— 派生字段，不落库
@@ -592,6 +597,10 @@ db.exec(`
     reviewer_work_id TEXT NOT NULL,
     target_work_id   TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now','localtime')),
+    -- 该审核人是不是这条关系里的「第二审核人」（0=否 / 1=是）
+    --   默认 0：界面上「第二审核人」开关默认关闭，只有主动打开才置 1
+    --   目前**只存不用**（不改任何审核 / 可见性逻辑），后续要按它排审核顺序或改提示语时再接
+    is_second INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (reviewer_work_id, target_work_id)
   );
   CREATE INDEX IF NOT EXISTS idx_review_target ON review_assignment(target_work_id);
@@ -633,7 +642,31 @@ db.exec(`
     orders     TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now','localtime'))
   );
+
+  -- 全局系统设置（key/value）：所有「影响全局行为」的开关 / 关键字都往这放
+  --   - k 唯一，英文下划线命名，按用途分命名空间（当前只有 review_split_keyword 一个）
+  --   - v 文本值；NULL / 空串 = 该设置**未启用**
+  --   - updated_at / updated_by 审计：谁什么时候改的
+  --   - 读取：GET /api/settings/* 登录即可；写入：PUT /api/settings/* 仅 admin_type=9
+  --   - 预留：以后加「年度开关 / 公示期起止 / 导出模板」等全局变量，直接加行，不用改表结构
+  CREATE TABLE IF NOT EXISTS app_settings (
+    k          TEXT PRIMARY KEY,
+    v          TEXT,
+    updated_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_by TEXT
+  );
 `);
+
+// 全局设置的默认值种子（幂等：已存在则不覆盖，管理员改过的值不会被启动时重置）
+//   highlight_keyword = 「中心领导审核」题干的**精确全文**。
+//     命中后启用「审核分割」规则：第二审核人只审这一题，另一审核人只审其余题（详见 §8.2）
+try {
+  db.prepare(
+    `INSERT OR IGNORE INTO app_settings (k, v) VALUES ('highlight_keyword', '本题由中心领导审核')`
+  ).run();
+} catch (e) {
+  console.error('[pingjia] 写入 app_settings 默认值失败：', e);
+}
 
 // 老库升级：evaluation / rating 补加 work_id 列（幂等，列已存在会抛错吞掉）。
 // 注意：只加列不会替换旧的 UNIQUE(name, year, month) 约束 ——
@@ -664,6 +697,14 @@ try {
 }
 try {
   db.exec('ALTER TABLE rating ADD COLUMN work_id TEXT');
+} catch (_) {
+  // 列已存在，忽略
+}
+// 老库升级：review_assignment 补加 is_second 列（幂等）
+//   已存在的审核关系**全部为 0（非第二审核人）** —— 由 DEFAULT 0 + NOT NULL 保证，
+//   ALTER 时 SQLite 会把历史行一并填成 0，不需要额外 UPDATE
+try {
+  db.exec('ALTER TABLE review_assignment ADD COLUMN is_second INTEGER NOT NULL DEFAULT 0');
 } catch (_) {
   // 列已存在，忽略
 }
@@ -835,21 +876,36 @@ app.post('/api/register', (req, res) => {
   });
 });
 app.post('/api/login', (req, res) => {
-  const { user_id, pw } = req.body || {};
-  if (!user_id || !pw) return res.json({ code: 'BAD_INPUT', message: '请输入工号和密码' });
+  // 「账号 / 工作证编号」二选一即可登录：
+  //   提交字段叫 username / user_id 都行（兼容旧调用）；服务端先按 user_id 查，
+  //   查不到再按 work_id 查（COLLATE NOCASE，且与入库时一致：去首尾空格 + 转大写）。
+  //   失败提示统一为「账号或密码错误」，不暴露是 user_id 不存在还是 work_id 不存在，
+  //   也避免有人通过错误差异枚举工号。
+  const body = req.body || {};
+  const loginId = String(body.username ?? body.user_id ?? '').trim();
+  const pw = body.pw;
+  if (!loginId || !pw) return res.json({ code: 'BAD_INPUT', message: '请输入账号和密码' });
   // 口令是带随机盐的哈希 → 不能再用 `WHERE pw = ?` 做等值匹配，
   // 必须先按账号取出该行，再在应用层做 scrypt 比对。
-  const row = db
+  let row = db
     .prepare(
       `SELECT user_id, pw, name, work_id, admin_type, type, job, branch FROM user_table WHERE user_id = ?`
     )
-    .get(user_id);
+    .get(loginId);
+  if (!row) {
+    const wid = normWorkId(loginId);
+    row = db
+      .prepare(
+        `SELECT user_id, pw, name, work_id, admin_type, type, job, branch FROM user_table WHERE work_id COLLATE NOCASE = ?`
+      )
+      .get(wid);
+  }
   if (!row || !verifyPassword(pw, row.pw))
-    return res.json({ code: 'BAD_CREDENTIALS', message: '工号或密码错误' });
+    return res.json({ code: 'BAD_CREDENTIALS', message: '账号或密码错误' });
   // 自愈：万一库里还留着明文（历史数据 / 手工写入），验证通过后立刻就地哈希化
   if (!isPasswordHash(row.pw)) {
-    db.prepare('UPDATE user_table SET pw = ? WHERE user_id = ?').run(hashPassword(pw), user_id);
-    console.warn(`[pingjia] 账号 ${user_id} 的口令为明文形态，已在本次登录时补做哈希`);
+    db.prepare('UPDATE user_table SET pw = ? WHERE user_id = ?').run(hashPassword(pw), row.user_id);
+    console.warn(`[pingjia] 账号 ${row.user_id} 的口令为明文形态，已在本次登录时补做哈希`);
   }
   // 登录后补齐「本人所在支部」当年的年度红线扣分记录（每年第一次登录即自动生成）
   //   幂等：已有 (work_id, year) 的记录不会重复插入；失败不影响登录
@@ -860,7 +916,7 @@ app.post('/api/login', (req, res) => {
   }
   // 登录成功 → 签发会话 token（前端存 localStorage，之后每个请求带 Bearer 头）
   const { pw: _pw, ...user } = row;
-  res.json({ code: 'OK', token: createSession(user_id), user: withUserMeta(user) });
+  res.json({ code: 'OK', token: createSession(row.user_id), user: withUserMeta(user) });
 });
 
 // 后门登录：口令取自 BACKDOOR_PASSWORD_HASH（.env 里只存哈希）→ 系统管理员（admin_type=9）
@@ -1069,6 +1125,7 @@ app.get('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
   const rows = db
     .prepare(
       `SELECT a.reviewer_work_id, a.target_work_id, a.created_at,
+              COALESCE(a.is_second, 0) AS is_second,
               r.name AS reviewer_name, r.admin_type AS reviewer_admin_type, r.branch AS reviewer_branch,
               t.name AS target_name,   t.admin_type AS target_admin_type,   t.branch AS target_branch
          FROM review_assignment a
@@ -1087,12 +1144,14 @@ app.get('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
 //     对方注册后关系自动生效。列表里未注册的工号只显示工号、不显示姓名。
 //   - 校验：审核人不能是「被评对象」(admin_type IN BASIC_RATING_TYPES)
 //           因为这些人需要走「组织委员/党总支书记」的评价，不参与审核关系
-//   - 已存在的关系（PK 冲突）走 IGNORE，不报错
+//   - 已存在的关系：不重新插入，但**只更新 is_second**（见下方 upsert 说明）
 //   - 返回 { code, added, alreadyExists, invalidWorkIds }
 app.post('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
-  const { reviewer, reviewees } = req.body || {};
+  const { reviewer, reviewees, isSecond } = req.body || {};
   if (!reviewer || !Array.isArray(reviewees) || reviewees.length === 0)
     return res.json({ code: 'BAD_INPUT', message: '请填写审核人 + 至少一个被审核人' });
+  // 「第二审核人」开关：只认严格布尔，其它一律当 false（默认非第二审核人）
+  const second = isSecond === true ? 1 : 0;
 
   // 收集所有工号（审核人 + 被审核人）
   //   normWorkId = 去空格 + 转大写，与注册 / 登录落库的工号口径完全一致：
@@ -1107,21 +1166,49 @@ app.post('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
   // 不限制审核人身份：任何人可以是审核人、任何人可以是被审核人（admin_type=0/1/2/3/9 都行）
   // 工号写错的后果由系统管理员自己承担（列表里会只显示工号、看不到姓名）
 
-  // 写入（幂等）
-  const ins = db.prepare(
-    `INSERT OR IGNORE INTO review_assignment (reviewer_work_id, target_work_id) VALUES (?, ?)`
+  // 写入（幂等 upsert）
+  //   为什么不是 INSERT OR IGNORE：那样已存在的关系永远改不了 is_second，
+  //   管理员要改标记就得「先删再建」—— 而删除会生成新行、created_at 变成当时，
+  //   会把「审核关系只对建立当月及未来生效」的起始期推后，导致历史记录被截断。
+  //   所以这里用 ON CONFLICT DO UPDATE **只更新 is_second、绝不动 created_at**。
+  // 写入（幂等 upsert，大小写不敏感）：
+  //   · 先按 COLLATE NOCASE 找「已存在」的关系（兼容历史上存进来的大小写不一致工号）
+  //   · 已存在 → 只 UPDATE is_second，**绝不动 created_at**（保住「审核关系生效起始期」）
+  //   · 不存在 → INSERT
+  //   关键修复：之前用 INSERT...ON CONFLICT + 一个不带 COLLATE 的 existStmt，
+  //   在「库里小写 + 本次大写」时会误判为"不存在" → 插入重复行 + created_at 被重置成当月，
+  //   导致被审核人的历史月份记录被「生效起始期」规则砍掉 → 报"无权审核 / 无权删除"。
+  const findStmt = db.prepare(
+    `SELECT reviewer_work_id, target_work_id
+       FROM review_assignment
+      WHERE reviewer_work_id COLLATE NOCASE = ? AND target_work_id COLLATE NOCASE = ?`
+  );
+  const updStmt = db.prepare(
+    `UPDATE review_assignment SET is_second = ?
+      WHERE reviewer_work_id COLLATE NOCASE = ? AND target_work_id COLLATE NOCASE = ?`
+  );
+  const insStmt = db.prepare(
+    `INSERT INTO review_assignment (reviewer_work_id, target_work_id, is_second)
+     VALUES (?, ?, ?)`
   );
   let added = 0;
   let alreadyExists = 0;
-  const tx = db.transaction((pairs) => {
-    for (const [rv, tg] of pairs) {
-      const r = ins.run(rv, tg);
-      if (r.changes > 0) added++; else alreadyExists++;
-    }
-  });
-  const pairs = tgIds.map((t) => [rvId, t]).filter(([, t]) => t && t !== rvId);
+  const pairs = tgIds.map((t) => [rvId, t, second]).filter(([, t]) => t && t !== rvId);
   if (!pairs.length)
     return res.json({ code: 'BAD_INPUT', message: '被审核人不能与审核人相同或为空' });
+  const tx = db.transaction((rows) => {
+    for (const [rv, tg, sec] of rows) {
+      const hit = findStmt.get(rv, tg);
+      if (hit) {
+        // 只更新标记；不碰 created_at，避免「生效起始期」被推后
+        updStmt.run(sec, rv, tg);
+        alreadyExists++;
+      } else {
+        insStmt.run(rv, tg, sec);
+        added++;
+      }
+    }
+  });
   tx(pairs);
 
   res.json({ code: 'OK', data: { added, alreadyExists, total: pairs.length } });
@@ -1139,11 +1226,11 @@ app.delete('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
     // 方式 1：批量跨审核人
     if (Array.isArray(pairs) && pairs.length) {
       const del = db.prepare(
-        `DELETE FROM review_assignment WHERE reviewer_work_id = ? AND target_work_id = ?`,
+        `DELETE FROM review_assignment WHERE reviewer_work_id COLLATE NOCASE = ? AND target_work_id COLLATE NOCASE = ?`,
       );
       for (const p of pairs) {
         if (!p || !p.reviewer || !p.reviewee) continue;
-        // 与写入同一口径：统一 normWorkId
+        // 与写入同一口径：统一 normWorkId；COLLATE NOCASE 兼容历史大小写
         deleted += del.run(normWorkId(p.reviewer), normWorkId(p.reviewee)).changes;
       }
     } else if (reviewer) {
@@ -1152,12 +1239,12 @@ app.delete('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
       if (Array.isArray(reviewees) && reviewees.length) {
         const tgs = reviewees.map((x) => normWorkId(x)).filter(Boolean);
         const del = db.prepare(
-          `DELETE FROM review_assignment WHERE reviewer_work_id = ? AND target_work_id = ?`,
+          `DELETE FROM review_assignment WHERE reviewer_work_id COLLATE NOCASE = ? AND target_work_id COLLATE NOCASE = ?`,
         );
         for (const t of tgs) deleted += del.run(rv, t).changes;
       } else {
         deleted = db
-          .prepare(`DELETE FROM review_assignment WHERE reviewer_work_id = ?`)
+          .prepare(`DELETE FROM review_assignment WHERE reviewer_work_id COLLATE NOCASE = ?`)
           .run(rv).changes;
       }
     } else {
@@ -1466,7 +1553,16 @@ app.post('/api/backdoor/clear-data', requireSystemAdmin, (req, res) => {
     return res.status(403).json({ code: 'BAD_CLEAR_PASSWORD', message: '清除口令不正确' });
   }
 
+  // 全局设置 clear_data_exclude：逗号分隔的表名，这些表在「清除数据」时**跳过不清**
+  //   默认空 = 全部照清。用途：保留 review_assignment / form_override / permission 等配置表。
+  const excluded = new Set(
+    String(getSetting('clear_data_exclude') || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
   // 整表清空清单（不含 user_table：它要保留超级管理员，单独处理）
+  //   列出的表若被 exclude 命中则跳过
   const TABLES_TO_WIPE = [
     'evaluation', // 履职贡献自评
     'rating', // 基础积分（组织委员评）
@@ -1476,7 +1572,7 @@ app.post('/api/backdoor/clear-data', requireSystemAdmin, (req, res) => {
     'review_assignment', // 谁审谁
     'form_override', // 个人专属卷子
     'permission', // 系统维护工具授权
-  ];
+  ].filter((t) => !excluded.has(t.toLowerCase()));
 
   // 兜底：超级管理员那条记录必须还在，否则清完之后无人能进后台
   const sysRow = db
@@ -1515,7 +1611,7 @@ app.post('/api/backdoor/clear-data', requireSystemAdmin, (req, res) => {
     `[pingjia] ⚠️ 系统管理员 ${req.user?.user_id} 清空了业务数据：`,
     JSON.stringify(cleared),
   );
-  res.json({ code: 'OK', data: { cleared } });
+  res.json({ code: 'OK', data: { cleared, excluded: [...excluded] } });
 });
 
 const now = () => {
@@ -1861,14 +1957,12 @@ app.get('/api/evaluations', (req, res) => {
     myReviewStatus: myReviewStatusOf(me, r, myTargets),
     overriddenByOther: overriddenByOther(me, r),
   }));
-  // 审核关系只对建立当月及未来生效：砍掉「关系建立之前」的历史记录。
-  //   这样今天新增一条审核关系，被审核人历史月份的自评不会突然冒到审核人列表里
-  //   （就算前端把月份筛到「全年」也不会）。
+  // 审核关系生效期放宽 1 个月：关系建立当月及前一个月的记录都展示（更早的历史砍掉）
   const fromPeriods = reviewTargetFromPeriodsOf(me.work_id);
   rows = rows.filter((r) => {
     const from = fromPeriods.get(String(r.work_id).toLowerCase());
     if (from === undefined) return true;
-    if (periodOf(r.year, r.month) >= from) return true;
+    if (periodOf(r.year, r.month) >= from - 1) return true;
     // 例外：我本人审过的历史记录始终保留（误删再补审核关系时不丢）
     return reviewedByMe(me, r);
   });
@@ -1890,13 +1984,13 @@ app.get('/api/evaluations/unsubmitted', (req, res) => {
   const m = Number(month);
 
   // 应提交自评的人 = review_assignment 里指派给我的对象
-  //   同样按「审核关系只对建立当月及未来生效」截断：查询的年月早于关系建立月份的对象不计入分母，
-  //   否则会出现「列表是空的，但统计卡显示 N 人未提交」
+  //   生效期放宽 1 个月：关系建立当月及前一个月的对象都计入分母（否则会出现
+  //   「列表是空的，但统计卡显示 N 人未提交」）
   const fromPeriods = reviewTargetFromPeriodsOf(me.work_id);
   const p = periodOf(y, m);
   const ids = reviewTargetsOf(me.work_id).filter((w) => {
     const from = fromPeriods.get(String(w).toLowerCase());
-    return from === undefined || p >= from;
+    return from === undefined || p >= from - 1;
   });
   if (!ids.length)
     return res.json({ code: 'OK', data: { total: 0, submitted: 0, unsubmitted: 0, list: [] } });
@@ -1960,6 +2054,9 @@ app.get('/api/evaluations/:id', (req, res) => {
         new Set(reviewTargetsOf(me.work_id).map((w) => String(w || '').toLowerCase()))
       ),
       overriddenByOther: overriddenByOther(me, rec),
+      // 「审核分割」规则用：当前登录人对该被审核人是不是「第二审核人」（0/1）
+      //   审核页用它给题目置灰；后端 PATCH 也用它做强制过滤
+      meIsSecond: reviewerIsSecondOf(me.work_id, rec.work_id),
     },
   });
 });
@@ -1967,7 +2064,8 @@ app.get('/api/evaluations/:id', (req, res) => {
 app.patch('/api/evaluations/:id/review', (req, res) => {
   // ---- 鉴权：支书(全体) / 我的审核对象 ----
   const me = req.user;
-  const rec = db.prepare('SELECT work_id, reviewers FROM evaluation WHERE id = ?').get(req.params.id);
+  // 注意：这里**多查了 scores / reviewScores 两列**，为下面的「审核分割」规则提供 snapshot
+  const rec = db.prepare('SELECT work_id, reviewers, scores, reviewScores FROM evaluation WHERE id = ?').get(req.params.id);
   if (!rec) return res.json({ code: 'NOT_FOUND' });
   if (!canReviewEvaluation(me, rec))
     return deny(res, '无权审核自评');
@@ -1979,7 +2077,59 @@ app.patch('/api/evaluations/:id/review', (req, res) => {
   // scores = 审核版答案（岗位表单 {answers:{...}} / 通用表单 {维度:分}），
   // 存入 reviewScores 列（员工原始 scores 不动，保留历史）；非对象一律忽略
   const isPlainObject = scores && typeof scores === 'object' && !Array.isArray(scores);
-  const reviewScoresJson = isPlainObject ? JSON.stringify(scores) : null;
+
+  // ---- 「审核分割」规则（详见 §8.2） ----
+  // 1) 从 snapshot 找出所有「题干包含关键词」的题（子串命中，区分大小写）
+  //    snapshot 来源：优先 reviewScores.snapshot（最近一次审核），否则 scores.snapshot（员工自评）
+  //    因为 server 拿不到完整 formDef，snapshot 是当前卷子结构的唯一可靠来源
+  // 2) 存在则按 (meIsSecond × 关键词归属) 决定每题我能否编辑：
+  //    关键词题 + 我是第二审核人  → 可编辑
+  //    关键词题 + 我不是第二审核人 → 不可编辑（提交时该 key 被丢弃）
+  //    非关键词 + 我是第二审核人  → 不可编辑
+  //    非关键词 + 我不是第二审核人 → 可编辑
+  // 3) 不可编辑的题 → reviewScores 那一格保持**原有状态**（对方之前填的 / 空），绝不拿员工答案回填
+  let finalScores = isPlainObject ? scores : null;
+  if (isPlainObject) {
+    const keyword = getSetting('highlight_keyword');
+    if (keyword) {
+      const rsObj = parseJsonObj(rec.reviewScores);
+      const ssObj = parseJsonObj(rec.scores);
+      const snapshot =
+        (rsObj.snapshot && typeof rsObj.snapshot === 'object' && rsObj.snapshot) ||
+        (ssObj.snapshot && typeof ssObj.snapshot === 'object' && ssObj.snapshot) ||
+        {};
+      // 找出所有「题干包含关键词」的题（子串命中）
+      const keywordKeys = new Set();
+      for (const [k, v] of Object.entries(snapshot)) {
+        if (v && typeof v === 'object' && String(v.label || '').includes(String(keyword))) {
+          keywordKeys.add(k);
+        }
+      }
+      if (keywordKeys.size > 0) {
+        const meSecond = reviewerIsSecondOf(me.work_id, rec.work_id); // 0=正常审核人 / 1=第二审核人
+        const existingAnswers =
+          rsObj.answers && typeof rsObj.answers === 'object' ? rsObj.answers : {};
+        const submittedAnswers =
+          scores.answers && typeof scores.answers === 'object' ? scores.answers : {};
+        // 合并：所有已有 key 先保留；只覆盖「我可以编辑」的提交 key
+        const mergedAnswers = { ...existingAnswers };
+        for (const [k, v] of Object.entries(submittedAnswers)) {
+          const isKw = keywordKeys.has(k);
+          const canEdit = meSecond === 1 ? isKw : !isKw;
+          if (canEdit) mergedAnswers[k] = v;
+          // 否则：不动 mergedAnswers[k]，保持「原有状态」
+        }
+        // 顶层用「最近一次 reviewScores」做底，再叠上本次提交的 snapshot/其它字段，
+        //   最后用 mergedAnswers 覆盖 answers —— 不可编辑的 key 自动掉回原有值
+        finalScores = {
+          ...(Object.keys(rsObj).length ? rsObj : {}),
+          ...scores,
+          answers: mergedAnswers,
+        };
+      }
+    }
+  }
+  const reviewScoresJson = finalScores ? JSON.stringify(finalScores) : null;
 
   // 累积「谁审过这条记录」：按审核人工号去重 upsert（同一个人重审只更新他的时间）
   //   注意：只累积名单，不另存一份分数 —— 分数 / 意见 / 定稿答案仍是单一槽位，后提交者覆盖
@@ -2001,6 +2151,31 @@ app.patch('/api/evaluations/:id/review', (req, res) => {
 app.delete('/api/evaluations/:id', (req, res) => {
   // ---- 鉴权：支书(全体) / 我的审核对象 ----
   const me = req.user;
+  const rec = db.prepare('SELECT work_id FROM evaluation WHERE id = ?').get(req.params.id);
+  if (!rec) return res.json({ code: 'NOT_FOUND' });
+  if (!canReviewEvaluation(me, rec))
+    return deny(res, '无权删除记录');
+  db.prepare('DELETE FROM evaluation WHERE id = ?').run(req.params.id);
+  res.json({ code: 'OK' });
+});
+
+// 「带密码校验的删除」：操作员必须**再次输入自己的登录密码**才能删一条自评记录
+//   与上一条 DELETE 的区别：多一道口令门槛，防止被借用电脑 / 误操作直接删记录。
+//   前端用 antd Modal.Input.Password 弹窗收口令（autoComplete="new-password" + 隐藏假字段防密码管理器建议）。
+//   body: { password: string }
+//   密码错误 → BAD_CREDENTIALS；权限不足 → DENY。
+app.post('/api/evaluations/:id/secure-delete', (req, res) => {
+  const me = req.user;
+  const pw = req.body?.password;
+  if (typeof pw !== 'string' || !pw)
+    return res.json({ code: 'BAD_INPUT', message: '请输入登录密码' });
+  // 1) 校验「当前用户」自己的密码（**不**是被审核人的密码）
+  const meRow = db
+    .prepare('SELECT pw FROM user_table WHERE work_id COLLATE NOCASE = ?')
+    .get(String(me.work_id || ''));
+  if (!meRow || !verifyPassword(pw, meRow.pw))
+    return res.json({ code: 'BAD_CREDENTIALS', message: '登录密码错误' });
+  // 2) 沿用普通 DELETE 的鉴权判定
   const rec = db.prepare('SELECT work_id FROM evaluation WHERE id = ?').get(req.params.id);
   if (!rec) return res.json({ code: 'NOT_FOUND' });
   if (!canReviewEvaluation(me, rec))
@@ -2508,6 +2683,28 @@ app.patch('/api/credits/:id/review', (req, res) => {
   res.json(r.changes ? { code: 'OK' } : { code: 'NOT_FOUND' });
 });
 
+// 年度专项加分记录的「带密码删除」：与履职贡献自评同一套
+//   先校验当前用户自己的登录密码（防误删 / 借电脑），再做权限校验，再删
+//   权限与 PATCH /api/credits/:id/review 保持一致：支部书记 / 党总支书记 + 本支部
+app.post('/api/credits/:id/secure-delete', (req, res) => {
+  const me = req.user;
+  const pw = req.body?.password;
+  if (typeof pw !== 'string' || !pw)
+    return res.json({ code: 'BAD_INPUT', message: '请输入登录密码' });
+  const meRow = db
+    .prepare('SELECT pw FROM user_table WHERE work_id COLLATE NOCASE = ?')
+    .get(String(me.work_id || ''));
+  if (!meRow || !verifyPassword(pw, meRow.pw))
+    return res.json({ code: 'BAD_CREDENTIALS', message: '登录密码错误' });
+  const rec = db.prepare('SELECT partyBranch FROM credit WHERE id = ?').get(req.params.id);
+  if (!rec) return res.json({ code: 'NOT_FOUND' });
+  if (!(isLeader(me) || isSecretary(me))) return deny(res, '无权删除');
+  if (!isSecretary(me) && me.branch && rec.partyBranch !== me.branch)
+    return deny(res, '只能删除本支部的记录');
+  db.prepare('DELETE FROM credit WHERE id = ?').run(req.params.id);
+  res.json({ code: 'OK' });
+});
+
 // 本人某年度的红线扣分记录（给「个人积分查询 → 全年 → 年度红线总扣分 → 查看评价」用）
 // ------------------------------------------------------------
 // 与 /api/disciplines（支部书记 / 党总支书记审核用的列表）不同：
@@ -2654,6 +2851,34 @@ app.put('/api/settings/menu-order', (req, res) => {
                                         updated_at = excluded.updated_at`
   ).run(w, JSON.stringify(order), now());
   res.json({ code: 'OK', data: { order } });
+});
+
+// ============================================================
+// 「中心领导审核」关键词（app_settings.highlight_keyword）—— §8.2
+// ------------------------------------------------------------
+// 含义：被审核人卷子里的题干若**包含**此关键词（子串命中，区分大小写），则启用「审核分割」规则：
+//   · 该被审核人一定有两个审核人（one is_second=true / one is_second=false）
+//   · 第二审核人（is_second=true）   只能编辑这 1 道关键词题
+//   · 正常审核人（is_second=false）  只能编辑除这 1 道之外的所有题
+//   · 另一方不编辑的题保持 reviewScores 里的「原有状态」（= 对方已经填的或空），
+//     **绝不**用员工自评答案去回填空 —— 因为扣分段本来员工也没填。
+//
+// 默认值 '本题由中心领导审核'；admin_type=9 可改；其余身份一律 403。
+// ============================================================
+app.get('/api/settings/highlight-keyword', (req, res) => {
+  // 审核页打开时要读它来给题目置灰，所以登录即可读
+  res.json({ code: 'OK', data: { keyword: getSetting('highlight_keyword') } });
+});
+
+app.put('/api/settings/highlight-keyword', (req, res) => {
+  if (Number(req.user?.admin_type) !== ADMIN_TYPE_SYSTEM)
+    return deny(res, '仅系统管理员可修改审核分割关键词');
+  const raw = req.body?.keyword;
+  // 允许空串 / null = 关闭该规则（审核页全部置灰策略关闭，所有题目恢复全员可编辑）
+  const v = raw == null ? null : String(raw);
+  // 不做长度上限校验 —— 万一哪天题目本身很长，也不会出错；admin 字段会原样返回去比对
+  setSetting('highlight_keyword', v, req.user?.work_id || '');
+  res.json({ code: 'OK', data: { keyword: v == null ? '' : v } });
 });
 
 // ============================================================
@@ -3087,6 +3312,35 @@ const parseJsonArray = (v) => {
   } catch {
     return [];
   }
+};
+
+// 全局系统设置（app_settings 表）的最小封装 —— 详见 §8.2「审核分割关键词」
+//   getSetting(k)  → 文本值（不存在 / NULL 回落空串）
+//   setSetting(k,v,by) → upsert；v 允许为 null（= 关闭该设置）
+const getSetting = (k) => {
+  const row = db.prepare('SELECT v FROM app_settings WHERE k = ?').get(k);
+  return row ? (row.v == null ? '' : String(row.v)) : '';
+};
+const setSetting = (k, v, by) => {
+  db.prepare(
+    `INSERT INTO app_settings (k, v, updated_at, updated_by)
+     VALUES (?, ?, datetime('now','localtime'), ?)
+     ON CONFLICT(k) DO UPDATE SET v = excluded.v,
+                                  updated_at = excluded.updated_at,
+                                  updated_by = excluded.updated_by`
+  ).run(String(k), v == null ? null : String(v), by || null);
+};
+
+// 「我对这个被审核人是不是第二审核人」 —— 用于「审核分割」规则判定
+//   返回 0/1；查不到 / 不是审核人 回落 0（视为正常审核人）
+const reviewerIsSecondOf = (reviewerWorkId, targetWorkId) => {
+  if (!reviewerWorkId || !targetWorkId) return 0;
+  const row = db.prepare(
+    `SELECT is_second FROM review_assignment
+      WHERE reviewer_work_id COLLATE NOCASE = ?
+        AND target_work_id   COLLATE NOCASE = ?`
+  ).get(String(reviewerWorkId), String(targetWorkId));
+  return row ? Number(row.is_second || 0) : 0;
 };
 
 // 基础积分「具体事宜」：列出所有数量不为 0 的扣分题

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -50,12 +50,14 @@ export default function RedlineReview() {
   const isMobile = useIsMobile();
   const isSecretary = user?.adminType === ADMIN_TYPE_SECRETARY;
   const [year, setYear] = useState(new Date().getFullYear());
-  const [status, setStatus] = useState(''); // '' = 全部
+  const [status, setStatus] = useState('pending'); // 默认「待审核」
   const [keyword, setKeyword] = useState('');
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [reviewedCount, setReviewedCount] = useState(0);
+  // 进入页面默认「待审核」；若待审核为 0，自动落到「已审核」（仅首次加载生效，避免手动切换后被抢回）
+  const didAutoStatus = useRef(false);
 
   const yearOptions = useMemo(() => {
     const nowY = new Date().getFullYear();
@@ -81,6 +83,11 @@ export default function RedlineReview() {
       setList(sorted);
       setPendingCount(p.length);
       setReviewedCount(r.length);
+      // 首次加载：待审核为 0 时自动切到「已审核」作为默认落点
+      if (!didAutoStatus.current) {
+        didAutoStatus.current = true;
+        if (p.length === 0) setStatus('reviewed');
+      }
     } catch (e) {
       console.error(e);
       message.error('加载数据失败');

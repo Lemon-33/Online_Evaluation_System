@@ -7,6 +7,7 @@ import {
   message,
   Alert,
   Space,
+  Switch,
   Table,
   Popconfirm,
   Tabs,
@@ -530,6 +531,9 @@ export function UserManagementTab({ users, reload }) {
 export function ReviewAssignmentsTab({ users, assignments, loading, reload }) {
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
+  // 「第二审核人」开关：**默认 false**，只有管理员主动打开，本次新增的关系才置 true
+  //   保存成功后重置回 false（与表单其它字段一起回到初始态）
+  const [isSecond, setIsSecond] = useState(false);
   // 表格多选：跨分页保留 selectedRowKeys（rowSelection.preserveSelectedRowKeys）
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
 
@@ -609,7 +613,7 @@ export function ReviewAssignmentsTab({ users, assignments, loading, reload }) {
       }
       const res = await apiRequest('/api/backdoor/assignments', {
         method: 'POST',
-        body: JSON.stringify({ reviewer, reviewees }),
+        body: JSON.stringify({ reviewer, reviewees, isSecond }),
       });
       if (res.code === 'OK') {
         const { added, alreadyExists } = res.data;
@@ -619,6 +623,7 @@ export function ReviewAssignmentsTab({ users, assignments, loading, reload }) {
             : `全部 ${alreadyExists} 条都已存在，未新增`,
         );
         form.resetFields();
+        setIsSecond(false); // 开关跟着表单一起回到默认「否」
         await reload();
       } else {
         message.error(res.message || '保存失败');
@@ -723,6 +728,20 @@ export function ReviewAssignmentsTab({ users, assignments, loading, reload }) {
       },
     },
     {
+      // 「第二审核人」标记：只读展示。改标记不用删了重建 —— 直接填同样的工号、
+      //   把开关拨到想要的状态再保存即可（后端 upsert 只改这一列，不动 created_at）
+      title: '第二审核人',
+      dataIndex: 'is_second',
+      width: 110,
+      align: 'center',
+      render: (v) =>
+        Number(v) === 1 ? (
+          <Tag color="blue">是</Tag>
+        ) : (
+          <span className="muted">否</span>
+        ),
+    },
+    {
       title: '操作',
       width: 90,
       align: 'center',
@@ -797,7 +816,13 @@ export function ReviewAssignmentsTab({ users, assignments, loading, reload }) {
             />
           </Form.Item>
           <Form.Item style={{ marginBottom: 0 }}>
-            <Space wrap>
+            <Space wrap align="center">
+              {/* 「第二审核人」开关：默认关闭，打开后本次新增的关系才标记为第二审核人。
+                  放在「保存」左边 —— 先决定是不是第二审核人，再点保存 */}
+              <Space size={8} align="center">
+                <Switch checked={isSecond} onChange={setIsSecond} />
+                <Text style={{ userSelect: 'none' }}>第二审核人</Text>
+              </Space>
               <Button
                 type="primary"
                 icon={<PlusOutlined />}
@@ -1219,7 +1244,7 @@ const CLEAR_CONFIRM_STEPS = {
   1: {
     title: '清除数据 · 第 1 / 3 次确认',
     content:
-      '此操作将清空数据库里的全部业务数据：员工账号、履职自评、履职评分、基础积分、个人荣誉、行为扣分、审核关系、个人卷子、工具授权，以及所有人的登录状态。只会保留你当前的超级管理员账号。',
+      '此操作将清空数据库里的全部业务数据：员工账号、履职自评、履职评分、基础积分、个人荣誉、行为扣分、审核关系、个人卷子、工具授权，以及所有人的登录状态。只会保留你当前的超级管理员账号。在全局设置（app_settings.clear_data_exclude）里指定的表不会被清空，其余表全部照清。',
     okText: '是，我已了解',
   },
   2: {

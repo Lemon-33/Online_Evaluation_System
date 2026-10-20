@@ -284,6 +284,26 @@ export async function deleteEvaluation(id) {
   return true;
 }
 
+// 「带密码校验的删除」（审核 / 审核列表页用）：调用方必须传操作员自己的登录密码
+//   失败时由后端返回 { code: 'BAD_CREDENTIALS' }，前端在弹窗里提示
+export async function secureDeleteEvaluation(id, password) {
+  if (USE_MOCK) {
+    const list = readMock().filter((x) => x.id !== id);
+    writeMock(list);
+    return { code: 'OK' };
+  }
+  return apiRequest(`/api/evaluations/${id}/secure-delete`, {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+}
+export async function secureDeleteCredit(id, password) {
+  return apiRequest(`/api/credits/${id}/secure-delete`, {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+}
+
 // ---------- 基础积分评价（组织委员 adminType=1） ----------
 
 const RATING_MOCK_KEY = 'mock_ratings';

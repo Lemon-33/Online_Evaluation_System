@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import {
   Table,
   Tag,
@@ -31,7 +31,7 @@ import {
   findPositionLabel,
   findBranchLabel,
 } from '../lib/constants';
-import { listEvaluations, getUnsubmittedCount } from '../lib/cloudbase';
+import { listEvaluations, getUnsubmittedCount, secureDeleteEvaluation } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
 import { useIsMobile } from '../lib/useIsMobile';
 
@@ -46,6 +46,8 @@ export default function Review() {
   const [keyword, setKeyword] = useState('');
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
+  // 进入页面默认「待审核」；若待审核为 0，自动落到「已审核」（仅首次加载生效，避免手动切换后被抢回）
+  const didAutoStatus = useRef(false);
   const navigate = useNavigate(); // 「审核」→ 整页审核表单 /review-form/:id
 
   // 所有审核人（含党总支书记）的范围一律由 review_assignment 决定：
@@ -78,6 +80,11 @@ export default function Review() {
       setReviewedCount(r.length);
       setUnsubmittedCount(needUnsubmitted ? unsub?.unsubmitted || 0 : 0);
       setUnsubList(needUnsubmitted ? unsub?.list || [] : []);
+      // 首次加载：待审核为 0 时自动切到「已审核」作为默认落点
+      if (!didAutoStatus.current) {
+        didAutoStatus.current = true;
+        if (p.length === 0) setStatus('reviewed');
+      }
     } catch (e) {
       console.error(e);
       message.error('加载数据失败');
@@ -97,6 +104,32 @@ export default function Review() {
   // 点击「审核」→ 跳整页审核表单（按记录 id 定位；路由守卫 perm="review"）
   // 表单按被审核人的岗位渲染，前两段回显员工答案，履职扣分段由审核人填写
   const openReview = (rec) => navigate(`/review-form/${rec.id}`);
+
+  // 「带密码删除」弹窗状态：open + 待删记录 + 输入的密码 + 提交中
+  //   走 secureDeleteEvaluation → 后端先校验 me 自己的登录密码，再做权限校验
+  const [delDlg, setDelDlg] = useState({ open: false, rec: null, pw: '', busy: false });
+  const openDelete = (rec) => setDelDlg({ open: true, rec, pw: '', busy: false });
+  const closeDelete = () =>
+    setDelDlg((s) => (s.busy ? s : { open: false, rec: null, pw: '', busy: false }));
+  const confirmDelete = async () => {
+    const { rec, pw } = delDlg;
+    if (!rec || !pw) return;
+    setDelDlg((s) => ({ ...s, busy: true }));
+    try {
+      const res = await secureDeleteEvaluation(rec.id, pw);
+      if (res?.code === 'OK') {
+        message.success('已删除');
+        setDelDlg({ open: false, rec: null, pw: '', busy: false });
+        await reload();
+      } else {
+        message.error(res?.message || '删除失败');
+        setDelDlg((s) => ({ ...s, busy: false }));
+      }
+    } catch (e) {
+      message.error(e?.message || '删除失败');
+      setDelDlg((s) => ({ ...s, busy: false }));
+    }
+  };
 
   // 复制未提交名单（http 环境下 clipboard API 可能不可用 → 传统方案兜底）
   const copyUnsubList = async () => {
@@ -179,12 +212,19 @@ export default function Review() {
     },
     {
       title: '操作',
-      width: 120,
+      width: 160,
       align: 'center',
       render: (_, rec) => (
-        <Button type="link" onClick={() => openReview(rec)}>
-          {(rec.myReviewStatus || rec.reviewStatus) === 'reviewed' ? '重新审核' : '审核'}
-        </Button>
+        // 两个同色 link 按钮并排：先审核 / 重新审核，再删除（带密码校验）
+        //   不用 Space，避免窄屏被切到下一行；按钮之间靠 antd 默认间距
+        <>
+          <Button type="link" onClick={() => openReview(rec)}>
+            {(rec.myReviewStatus || rec.reviewStatus) === 'reviewed' ? '重新审核' : '审核'}
+          </Button>
+          <Button type="link" onClick={() => openDelete(rec)}>
+            删除
+          </Button>
+        </>
       ),
     },
   ];
@@ -381,6 +421,60 @@ export default function Review() {
         ) : (
           <Empty description="本月全员已提交" />
         )}
+      </Modal>
+
+      {/* 「带密码校验的删除」弹窗 —— 不离开当前页面
+          - 不显示 / 不自动填充密码（autoComplete="new-password" + 隐藏假用户名骗启发式）
+          - 确认按钮 danger 红字，密码为空时禁用 */}
+      <Modal
+        open={delDlg.open}
+        title={
+          delDlg.rec
+            ? `删除 ${delDlg.rec.name || ''} ${scopeLabel}的自评记录？`
+            : '删除记录'
+        }
+        okText="删除"
+        okButtonProps={{ danger: true, disabled: !delDlg.pw || delDlg.busy }}
+        cancelText="取消"
+        confirmLoading={delDlg.busy}
+        onCancel={closeDelete}
+        onOk={confirmDelete}
+        destroyOnClose
+        maskClosable={!delDlg.busy}
+      >
+        <p style={{ marginTop: 0 }}>
+          删除后不可恢复，<strong>将同时清除该条自评的全部填写数据</strong>。
+          请输入您本人的登录密码以确认操作。
+        </p>
+        {/* 防止浏览器/密码管理器自动填充的「假用户名」字段 */}
+        <input
+          type="text"
+          name="fake-username"
+          autoComplete="username"
+          aria-hidden="true"
+          tabIndex={-1}
+          style={{
+            position: 'absolute',
+            left: -9999,
+            top: 0,
+            width: 1,
+            height: 1,
+            opacity: 0,
+          }}
+        />
+        <Input.Password
+          value={delDlg.pw}
+          onChange={(e) =>
+            setDelDlg((s) => ({ ...s, pw: e.target.value }))
+          }
+          onPressEnter={() => !delDlg.busy && confirmDelete()}
+          placeholder="登录密码"
+          autoComplete="new-password"
+          autoFocus
+          data-form-type="other"
+          data-lpignore="true"
+          data-1p-ignore="true"
+        />
       </Modal>
     </div>
   );

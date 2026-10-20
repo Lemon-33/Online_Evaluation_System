@@ -79,7 +79,7 @@ export default function Login() {
           <Title level={3} style={{ margin: '8px 0 0', color: '#b71c1c' }}>
             党员评价系统
           </Title>
-          <Text type="secondary">使用注册的账号登录</Text>
+          <Text type="secondary">使用账号或工作证编号登录</Text>
         </div>
 
         {/* 默认账号只存在于「本地调试模式」（数据存在浏览器 localStorage 里）。
@@ -95,11 +95,14 @@ export default function Login() {
 
         <Form form={form} layout="vertical" onFinish={onFinish}>
           <Form.Item
-            label="账号"
+            label="账号 / 工作证编号"
             name="username"
-            rules={[{ required: true, message: '请输入账号' }]}
+            rules={[{ required: true, message: '请输入账号或工作证编号' }]}
           >
-            <Input placeholder="登录账号（6-20 位数字字母）" autoComplete="username" />
+            <Input
+              placeholder="登录账号，或工作证编号"
+              autoComplete="username"
+            />
           </Form.Item>
           <Form.Item
             label="密码"

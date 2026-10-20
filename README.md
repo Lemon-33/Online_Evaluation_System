@@ -278,9 +278,38 @@ CREATE TABLE review_assignment (
   reviewer_work_id TEXT NOT NULL,   -- 审核人工号
   target_work_id   TEXT NOT NULL,   -- 被审核人工号
   created_at       TEXT DEFAULT (datetime('now','localtime')),
+  is_second INTEGER NOT NULL DEFAULT 0,  -- 是否「第二审核人」（0=否 / 1=是），详见 §8.1
   PRIMARY KEY (reviewer_work_id, target_work_id)
 );
 ```
+
+### 8.1 「第二审核人」标记 `is_second`（2026-10-20 新增）
+
+**界面**：「审核关系维护」（`/review-assign` 与 `/backdoor` 的同一 Tab）里，
+「新增 / 追加 审核关系」表单的**保存按钮左边**有一个 `Switch`，标签「第二审核人」。
+
+- **默认 false**（关闭）：只有管理员主动拨开，本次新增的关系才置 `is_second = 1`
+- 保存成功后**开关自动复位为 false**（与表单其它字段一起回到初始态）
+- 列表多一列「第二审核人」显示「是 / 否」，只读
+
+**存量数据全部为 false**：`NOT NULL DEFAULT 0` + 启动时 `ALTER TABLE ... ADD COLUMN is_second INTEGER NOT NULL DEFAULT 0`，
+SQLite 会把所有历史行一并填成 0，不需要额外 UPDATE。
+
+**改标记不用删了重建** —— 这点很关键：`POST /api/backdoor/assignments` 用的是 upsert：
+
+```sql
+INSERT INTO review_assignment (reviewer_work_id, target_work_id, is_second)
+VALUES (?, ?, ?)
+ON CONFLICT(reviewer_work_id, target_work_id)
+DO UPDATE SET is_second = excluded.is_second
+```
+
+只改 `is_second`、**绝不动 `created_at`**。因为 `created_at` 是「审核关系生效起始期」的依据
+（见上面「只对建立当月及未来生效」），若走「先删再建」，新行 `created_at` 变成当时 →
+起始期被推后 → **该审核人会丢掉对历史月份记录的可见性**。
+
+> ⚠️ **2026-10-20 起已接通**：`is_second` 现在被「中心领导审核」审核分割规则使用，
+> 详见 §8.2。
 
 - **添加关系不要求工号已注册**（2026-10-16 改）：只要有工号就能建关系，
   未注册 / 已注销的工号在列表里**只显示工号、不显示姓名**（也不写「已注销」）。
@@ -334,6 +363,45 @@ CREATE TABLE review_assignment (
 - 改完关系后，**被指派者需重新登录**才会刷新菜单（`hasReviewTargets` 登录时下发）；后端放行是即时的。
 
 维护 SQL 与批量指派见 **`部署与审核关系维护.md` §7**。
+
+### 8.2 「中心领导审核」审核分割规则（2026-10-20 新增）
+
+**场景**：被审核人的卷子里有一道「本题由中心领导审核」的题；按制度，该被审核人
+**必须有 2 个审核人**：一个管这道题（**第二审核人**），一个管其余题目（**正常审核人**）。
+
+**前提**：被审核人在「审核关系维护」里必须**正好**有两条 `review_assignment`，
+且其中一条 `is_second=1`、另一条 `is_second=0`。
+
+**关键词配置**：存放在 `app_settings.highlight_keyword`（key/value 全局表），
+**默认** `本题由中心领导审核`。**只有系统管理员**可在「个人问卷维护」页修改
+（被授权使用本页的其他用户看不到该区块、API 也 403）。留空 = 关闭规则，全员可编辑。
+
+**匹配规则**：严格相等、区分大小写。`item.label === keyword` 才算命中。
+匹配基数来源是 `evaluation.reviewScores.snapshot` 或 `evaluation.scores.snapshot`（哪个先有就用哪个），
+因为服务端拿不到完整 `formDef`。
+
+**行为**：
+
+| 审核人 | 关键词题 | 非关键词题 |
+|---|---|---|
+| `is_second=1`（第二审核人） | ✅ 可编辑 | ❌ 置灰、提交时该格保持 reviewScores 原有值 |
+| `is_second=0`（正常审核人） | ❌ 置灰、提交时该格保持 reviewScores 原有值 | ✅ 可编辑 |
+
+**「原有状态」含义**：`evaluation.reviewScores.answers[key]` 当前是什么就保留什么：
+- 对方已填 → 提交后**不被覆盖**（你提交时带上去的值会被服务端丢弃）
+- 双方都没填过 → 保持空（**不会**回填员工自评的答案，因为扣分段员工本来也没填）
+
+**实现要点**：
+
+- 前端：`ReviewForm.jsx` 挂载时 GET `/api/settings/highlight-keyword`，结合 `rec.meIsSecond` 算 `isItemEditable(it)`，
+  命中规则的题用 `InputNumber disabled / Radio.Group disabled / TextArea disabled` 置灰
+- 后端：`PATCH /api/evaluations/:id/review` 用 `rec.meIsSecond + snapshot 中的关键词题 key` 做**强制过滤**，
+  不可编辑的 key 不写入。**前端置灰只是 UI，后端是真校验**，避免改前端绕过
+- 端点：`GET /api/settings/highlight-keyword`（登录即可）/ `PUT /api/settings/highlight-keyword`（`admin_type===9`）
+
+**全局表** `app_settings`：单一真源，存所有「影响全局行为」的开关 / 关键字。
+后续要加「年度开关 / 公示期起止 / 导出模板」等全局变量，直接加行不用改表结构。
+seed 默认值用 `INSERT OR IGNORE` 注入（不覆盖管理员改过的值）。
 
 ---
 
@@ -532,12 +600,18 @@ CREATE TABLE review_assignment (
 | `credit` | 人 × 年 | 个人荣誉。`UNIQUE(work_id, year)` |
 | `discipline` | 人 × 年 | 年度红线扣分（支部书记审）。`UNIQUE(work_id, year)`，见 §9.1 |
 | `session` | token | 登录会话，7 天有效，**持久化在库里**（重启不掉线） |
-| `review_assignment` | 关系 | 谁审谁 |
+| `review_assignment` | 关系 | 谁审谁。`is_second INTEGER NOT NULL DEFAULT 0` = 该审核人是不是「第二审核人」（详见 §8.1） |
 | `form_override` | 人 | 个人专属卷子。`form_def` 存**合并后的完整卷子**（不是差异补丁）；`position` 对不上自动失效 |
 | `permission` | 授权 | 谁被开放了哪个工具。`work_id` 是 `COLLATE NOCASE` |
 | `user_menu_order` | 人 | 侧边栏排序个人偏好（详见 §9.2）。`orders` 存 JSON 数组 |
 
 **口令存储**：全库 `pw` 都是 scrypt 哈希（`scrypt$N$r$p$salt$hash`）。启动时会把残留的明文**就地哈希化**（一次性、幂等，日志里能看到 `已把 N 条明文口令就地哈希化`），老账号密码不变、登录方式不变。哈希带随机盐，所以**登录校验在应用层做，SQL 里没法等值匹配**。
+
+**登录标识（2026-10-20）**：`POST /api/login` 的账号框可填 **`user_id`（登录账号）** 或 **`work_id`（工作证编号）**，任一都能登录。
+服务端先按 `user_id` 精确查，查不到再按 `work_id` 查（`COLLATE NOCASE`，且与注册入库口径一致：`normWorkId()` 去首尾空格 + 转大写）。
+请求体字段名 `username` / `user_id` 都接受（前端用 `user_id`）。
+失败提示统一为「账号或密码错误」—— 不区分「字段不存在」还是「密码错」，避免被用来枚举工号。
+`superadmin` **不走这条路**，它固定走后门接口 `/api/backdoor/login`（见 §6）。
 
 ---
 

@@ -29,6 +29,7 @@ import {
   ReloadOutlined,
   SaveOutlined,
   SearchOutlined,
+  SettingOutlined,
   UndoOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
@@ -41,7 +42,9 @@ import {
   findPositionLabel,
   getPositionForm,
 } from '../lib/constants';
+import { useAuth } from '../context/AuthContext';
 import {
+  apiRequest,
   deleteFormOverride,
   getFormOverride,
   listFormOverrideMembers,
@@ -128,6 +131,45 @@ export default function FormOverridePanel() {
   // ---- 题目编辑弹窗 / 预览弹窗 ----
   const [itemModal, setItemModal] = useState({ open: false, si: -1, ii: -1 });
   const [previewOpen, setPreviewOpen] = useState(false);
+
+  // ---- 全局设置：中心领导审核关键词（仅系统管理员可见 + 可改）----
+  const { user } = useAuth();
+  const isSuperAdmin = user?.adminType === ADMIN_TYPE_SYSTEM;
+  // keywordValue = 当前后端生效值（GET 拿到）；keywordInput = 输入框当前值（可能未保存）
+  const [keywordValue, setKeywordValue] = useState('');
+  const [keywordInput, setKeywordInput] = useState('');
+  const [savingKeyword, setSavingKeyword] = useState(false);
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    apiRequest('/api/settings/highlight-keyword')
+      .then((res) => {
+        if (res?.code === 'OK') {
+          const k = res.data?.keyword || '';
+          setKeywordValue(k);
+          setKeywordInput(k);
+        }
+      })
+      .catch((e) => message.error(e?.message || '加载关键词失败'));
+  }, [isSuperAdmin]);
+  const saveKeyword = async () => {
+    setSavingKeyword(true);
+    try {
+      const res = await apiRequest('/api/settings/highlight-keyword', {
+        method: 'PUT',
+        body: JSON.stringify({ keyword: keywordInput }),
+      });
+      if (res?.code === 'OK') {
+        setKeywordValue(keywordInput);
+        message.success('关键词已保存');
+      } else {
+        message.error(res?.message || '保存失败');
+      }
+    } catch (e) {
+      message.error(e?.message || '保存失败');
+    } finally {
+      setSavingKeyword(false);
+    }
+  };
 
   // 岗位基础模板（无 → 该岗位在 forms-data.mjs 里没有配置）
   const baseSections = useMemo(
@@ -415,6 +457,60 @@ export default function FormOverridePanel() {
 
   return (
     <>
+      {/* ===== 中心领导审核关键词（仅系统管理员可见 / 可改）=====
+            放在最顶部：这是整个系统层面的设置，不该被埋在一堆个人问卷编辑里。
+            该区块**不在 GRANTABLE_TOOLS 里**，被授权使用本页的其他用户进不来（接口 PUT 端硬校验 admin_type===9）。 */}
+      {isSuperAdmin && (
+        <Card
+          size="small"
+          style={{ marginBottom: 16 }}
+          title={
+            <Space>
+              <SettingOutlined />
+              <span>中心领导审核关键词</span>
+              <Tag color="purple">全局设置</Tag>
+            </Space>
+          }
+        >
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Typography.Text type="secondary">
+              被审核人卷子里的某道题若<strong>题干整条等于</strong>此关键词，则启用「审核分割」规则：
+              第二审核人（<code>is_second=true</code>）只能编辑这一题，另一审核人只能编辑其余题目。
+              双方都不编辑的题保持 reviewScores 里的<strong>原有状态</strong>（对方填的或空），不会拿员工答案回填。
+              留空 = 关闭该规则，所有题目恢复全员可编辑。
+            </Typography.Text>
+            <Space wrap size={8}>
+              <Input
+                value={keywordInput}
+                onChange={(e) => setKeywordInput(e.target.value)}
+                placeholder="如：本题由中心领导审核"
+                style={{ width: 360 }}
+                allowClear
+              />
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={savingKeyword}
+                disabled={keywordInput === keywordValue}
+                onClick={saveKeyword}
+              >
+                保存
+              </Button>
+            </Space>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              当前生效值：
+              {keywordValue ? (
+                <Typography.Text code copyable>
+                  {keywordValue}
+                </Typography.Text>
+              ) : (
+                <span style={{ color: '#999' }}>（未设置，规则关闭）</span>
+              )}
+            </Typography.Text>
+          </Space>
+        </Card>
+      )}
+
       <Alert
         type="warning"
         showIcon

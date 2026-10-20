@@ -44,6 +44,7 @@ import {
   getEvaluationById,
   reviewEvaluation,
   getFormOverride,
+  apiRequest,
 } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
 
@@ -132,11 +133,48 @@ export default function ReviewForm() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  // ---- 「审核分割」规则所需：拉全局关键词 ----
+  //   登录即可读（接口端 GET 放行）；后端 PATCH 会用同样的 key 做强制过滤，
+  //   所以前端算出来的 editableMap 只是 UI，最终能不能写还得服务端点头
+  const [keyword, setKeyword] = useState('');
+  useEffect(() => {
+    apiRequest('/api/settings/highlight-keyword')
+      .then((res) => {
+        if (res?.code === 'OK') setKeyword(res.data?.keyword || '');
+      })
+      .catch(() => {}); // 失败就当没设关键词 —— 全部题目可编辑（= 关闭分割规则）
+  }, []);
+
   // 被审核人岗位对应的专属表单（无则回落通用 5 项）
   //   优先用 snapshot 还原的历史题干（renderFormDef），保证与员工看到的题一致
   const formDef = rec
     ? renderFormDef || resolveFormDef(rec.position, rec.work_id, overrideRec)
     : null;
+
+  // ---- 「审核分割」：哪些题归我管 ----
+  //   触发条件：formDef 里存在题干**包含** keyword 的题（子串命中，区分大小写）
+  //   分配规则（rec.meIsSecond 由后端在 GET 时算出）：
+  //     meIsSecond===1（第二审核人）   → 只能编辑 关键词题
+  //     meIsSecond===0（正常审核人）   → 只能编辑 其余题目
+  //   meIsSecond 为 2+ / 异常值 → 视作正常审核人（保守处理，避免误锁）
+  const keywordKeys = useMemo(() => {
+    if (!keyword || !formDef) return new Set();
+    const out = new Set();
+    for (const sec of formDef.sections || []) {
+      for (const it of sec.items || []) {
+        if (String(it.label || '').includes(String(keyword))) out.add(it.key);
+      }
+    }
+    return out;
+  }, [keyword, formDef]);
+  const meIsSecond = Number(rec?.meIsSecond) === 1;
+  const isItemEditable = (it) => {
+    // 规则未激活（没配关键词 / formDef 没命中）→ 全可编辑
+    if (!keywordKeys.size) return true;
+    const isKw = keywordKeys.has(it.key);
+    return meIsSecond ? isKw : !isKw;
+  };
+
   const watchedAnswers = Form.useWatch('answers', form) || {};
   const watchedScores = Form.useWatch('scores', form) || {};
 
@@ -330,7 +368,7 @@ export default function ReviewForm() {
                 ? `注意：此后 ${lastReviewer.name || lastReviewer.workId} 又审核过并覆盖了结果，当前生效的是对方的版本。`
                 : '')
             : reviewed
-            ? `该记录已由 ${rec.reviewerName || '审核人'} 于 ${rec.reviewedAt || '-'} 审核得 ${rec.reviewScore} 分，但**您尚未审核**。请填写后提交，本次提交将覆盖对方的结果。`
+            ? `该记录已由 ${rec.reviewerName || '审核人'} 于 ${rec.reviewedAt || '-'} 审核得 ${rec.reviewScore} 分，但您尚未审核。请审核后提交，本次提交将覆盖对方的结果。`
             : '前两部分已按员工自评答案填入，可修改；「履职扣分」部分由您填写，右侧实时计算最终审核分。'
         }
         style={{ marginBottom: 16 }}
@@ -390,14 +428,14 @@ export default function ReviewForm() {
                         </div>
                         {it.type === 'fill' ? (
                           // 填空题：次数为 0 时不显示原因框，填了次数才出现（且必填）
-                          <FillAnswerItem it={it} isDeduct={isDeduct} />
+                          <FillAnswerItem it={it} isDeduct={isDeduct} disabled={!isItemEditable(it)} />
                         ) : (
                           <Form.Item
                             name={['answers', it.key]}
                             rules={[{ required: true, message: '请选择一个选项' }]}
                             style={{ marginBottom: 0 }}
                           >
-                            <Radio.Group>
+                            <Radio.Group disabled={!isItemEditable(it)}>
                               <Space direction="vertical">
                                 {it.options.map((o) => (
                                   <Radio key={o.value} value={o.value}>
@@ -619,7 +657,7 @@ export default function ReviewForm() {
 // 填了次数才出现（且必填），避免留下"有数量、没事由"的记录。
 // 抽成组件是因为要用 Form.useWatch 实时监听次数（hook 不能写在 .map 里）。
 // ============================================================
-function FillAnswerItem({ it, isDeduct }) {
+function FillAnswerItem({ it, isDeduct, disabled }) {
   const form = Form.useFormInstance();
   const watched = Form.useWatch(['answers', it.key, 'count'], form);
   const n = Number(watched) || 0;
@@ -643,6 +681,7 @@ function FillAnswerItem({ it, isDeduct }) {
           style={{ width: 120 }}
           placeholder="请输入数量"
           addonAfter={it.unit}
+          disabled={!!disabled}
           parser={(v) => (v === '' || /^\d+$/.test(v) ? v : '')}
           onKeyDown={(e) => {
             // 只允许数字与编辑键（与自评页一致）
@@ -685,6 +724,7 @@ function FillAnswerItem({ it, isDeduct }) {
             maxLength={500}
             showCount
             placeholder={isDeduct ? '请填写扣分具体事由' : '（员工未填写原因）'}
+            disabled={!!disabled}
           />
         </Form.Item>
       )}
