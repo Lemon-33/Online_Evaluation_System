@@ -27,7 +27,6 @@ import {
   RiseOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import { POSITION_TYPES, findLabel, findPositionLabel } from '../lib/constants';
 import {
   CREDIT_COUNT_MAX,
   CREDIT_ITEMS,
@@ -227,16 +226,8 @@ export default function CreditApply() {
         message={
           <Space wrap>
             <span style={{ fontWeight: 600 }}>年度专项加分申报</span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
-            <Tag color="purple">
-              {findPositionLabel(user?.position)} · {findLabel(POSITION_TYPES, user?.positionType)}
-            </Tag>
           </Space>
         }
-        description="按年度申报本人获得的荣誉表彰、创新创效、急难险重任务与示范引领类加分事项；同一事项获不同级别表彰的，只按最高级别申报。"
         style={{ marginBottom: 16 }}
       />
 
@@ -280,7 +271,7 @@ export default function CreditApply() {
           showIcon
           icon={<CheckCircleOutlined />}
           style={{ marginBottom: 16 }}
-          message={`${year} 年度专项加分已由 ${record.reviewerName || '审核人'} 于 ${record.reviewedAt || '-'} 核定：${Number(record.reviewScore || 0)} 分`}
+          message={`${year} 年度专项加分已由 ${record.reviewerName || '审核人'} 于 ${record.reviewedAt || '-'} 审核完成`}
           description={
             record.reviewComment
               ? `审核意见：${record.reviewComment}`
@@ -292,7 +283,8 @@ export default function CreditApply() {
       <Spin spinning={loading}>
         <Row gutter={16}>
           {/* 左侧：申报卷（按四类分组） */}
-          <Col span={16}>
+          {/* 窄屏（<768px）左栏整行，右栏（自报合计卡）掉到下面 */}
+          <Col span={16} xs={24} md={16}>
             {sections.map((sec) => (
               <Card
                 key={sec.key}
@@ -422,7 +414,7 @@ export default function CreditApply() {
           </Col>
 
           {/* 右侧：合计卡（未审核 = 自报合计；已审核 = 核定加分） */}
-          <Col span={8}>
+          <Col span={8} xs={24} md={8}>
             <Card
               title={
                 <Space>

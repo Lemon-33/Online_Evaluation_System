@@ -28,26 +28,30 @@ export const ROLES = {
 };
 
 // ===== 身份类型（admin_type，所有人都有；不再有"管理员 / 员工"二分）=====
-//   0 = 分管领导   只审核履职贡献、不自评；岗位类型可留空
-//   1 = 组织委员   履职贡献自评 + 基础积分评价；必须填岗位类型
-//   2 = 支部书记   履职贡献审核 + 基础积分评价（范围全体）；岗位类型可留空
-//   3 = 普通党员   履职贡献自评 + 只读查看；必须填岗位类型
+//   0 = 支部书记     只审核履职贡献、不自评；岗位类型可留空
+//   1 = 组织委员     履职贡献自评 + 基础积分评价；必须填岗位类型
+//   2 = 党总支书记   履职贡献审核 + 基础积分评价（范围全体）；岗位类型可留空
+//   3 = 普通党员     履职贡献自评 + 只读查看；必须填岗位类型
+//   4 = 分管领导     只审核履职贡献、不自评；不参与基础积分评价 / 年度红线扣分 /
+//                    年度专项加分；侧边栏只有「履职贡献评价审核」且恒出现
 // 取自 user_table.admin_type 字段；注册时由工号白名单决定
 export const ADMIN_TYPE_LEADER = 0;
 export const ADMIN_TYPE_ORGANIZER = 1;
 export const ADMIN_TYPE_SECRETARY = 2;
 export const ADMIN_TYPE_EMPLOYEE = 3;
+export const ADMIN_TYPE_DIRECTOR = 4;
 // 后门 / 系统管理员：仅用于 /backdoor 维护工具，不在白名单、不参与业务范围
 export const ADMIN_TYPE_SYSTEM = 9;
 
-// 兼容旧引用：ADMIN_TYPE_SUPER 即支部书记
+// 兼容旧引用：ADMIN_TYPE_SUPER 即党总支书记
 export const ADMIN_TYPE_SUPER = ADMIN_TYPE_SECRETARY;
 
 export const ADMIN_TYPE_META = {
-  [ADMIN_TYPE_LEADER]:    { text: '分管领导',   color: 'gold' },
+  [ADMIN_TYPE_LEADER]:    { text: '支部书记',   color: 'gold' },
   [ADMIN_TYPE_ORGANIZER]: { text: '组织委员',   color: 'purple' },
-  [ADMIN_TYPE_SECRETARY]: { text: '支部书记',   color: 'magenta' },
+  [ADMIN_TYPE_SECRETARY]: { text: '党总支书记', color: 'magenta' },
   [ADMIN_TYPE_EMPLOYEE]:  { text: '普通党员',   color: 'blue' },
+  [ADMIN_TYPE_DIRECTOR]:  { text: '分管领导',   color: 'volcano' },
   // 系统管理员原本是 red（红），与「扣分 / 待处理」等警示语义撞色，改用 geekblue（深蓝）区分
   [ADMIN_TYPE_SYSTEM]:    { text: '系统管理员', color: 'geekblue' },
 };
@@ -60,8 +64,9 @@ export const canSelfEval = (u) =>
 export const homePath = (u) => {
   const at = u?.adminType;
   if (at === ADMIN_TYPE_SYSTEM) return '/backdoor';     // 系统管理员：维护工具
-  if (at === ADMIN_TYPE_LEADER) return '/review';       // 分管领导：履职积分审核
-  if (at === ADMIN_TYPE_SECRETARY) return '/review';    // 支部书记：审核（可切基础积分评价）
+  if (at === ADMIN_TYPE_LEADER) return '/review';       // 支部书记：履职积分审核
+  if (at === ADMIN_TYPE_SECRETARY) return '/review';    // 党总支书记：审核（可切基础积分评价）
+  if (at === ADMIN_TYPE_DIRECTOR) return '/review';     // 分管领导：只有履职积分审核一项
   // 组织委员 / 普通党员：默认进「党员自我评价提交」（提交类工作的总入口；
   //   从那里再进「履职贡献自评提交」/「年度专项加分提交」）
   return '/self-center';
@@ -133,6 +138,33 @@ export const matchBranch = (recordBranch, branch) => {
   if (!branch) return true;
   return recordBranch === branch || recordBranch === findBranchLabel(branch);
 };
+
+// ============================================================
+// 履职贡献自评的可评月份范围
+// ------------------------------------------------------------
+// 起点：2026 年 10 月 —— 线上从 2026-10 才开始用，此前月份已封档：
+//   月历里一律置为「不可选」（既选不中也提不了），后端同步拒绝，防止绕过前端直发接口。
+// 终点：当前月份（未来月份不可选，各页面用 dayjs 现算）。
+// ============================================================
+export const EVAL_OPEN_FROM = { year: 2026, month: 10 };
+export const EVAL_OPEN_FROM_LABEL = `${EVAL_OPEN_FROM.year} 年 ${EVAL_OPEN_FROM.month} 月`;
+
+// 下界：该年月是否**已开启**（**不含**「未来月份」判断，后者另算）
+export const isMonthOpen = (year, month) =>
+  Number(year) > EVAL_OPEN_FROM.year ||
+  (Number(year) === EVAL_OPEN_FROM.year && Number(month) >= EVAL_OPEN_FROM.month);
+
+// 上界：该年月是不是**还没到**（晚于当前月）→ 尚未开启，不能提交也不能查看
+export const isFutureMonth = (year, month) => {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth() + 1;
+  return Number(year) > y || (Number(year) === y && Number(month) > m);
+};
+
+// 可提交 / 可查看的月份 = 下界与上界之间（含两端）
+export const isMonthSelectable = (year, month) =>
+  isMonthOpen(year, month) && !isFutureMonth(year, month);
 
 // ============================================================
 // 岗位专属自评表单（按岗位 value 索引，陆续补充 14 个岗位）
@@ -221,7 +253,7 @@ export const calcFormTotal = (formDef, answers = {}) => {
 // 管理员注册密钥 —— 已停用
 // ------------------------------------------------------------
 // 改用「工作证编号白名单」方案（白名单仅存于后端，见 server/admin-whitelist.mjs）：
-//   - 名单内 4 个工作证编号自动注册为管理员（W-0001/0002=分管领导, W-0003/0004=组织委员）
+//   - 名单内 4 个工作证编号自动注册为管理员（W-0001/0002=支部书记, W-0003/0004=组织委员）
 //   - 名单内 46 个工作证编号自动注册为普通党员（W-0005~W-0050）
 //   - 名单外的编号拒绝注册：后端返回 WORK_ID_NOT_IN_LIST
 // 前端不做白名单校验，提交时由后端判定。

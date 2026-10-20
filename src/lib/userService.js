@@ -17,7 +17,7 @@ const DEFAULT_MOCK_USERS = [
     user_id: 'admin',
     pw: 'admin123',
     work_id: '000001',
-    admin_type: 2, // 支部书记
+    admin_type: 2, // 党总支书记
     name: '默认支书',
     type: null,
     job: null,
@@ -74,7 +74,7 @@ const mockLogin = ({ user_id, pw }) => {
 // 保持前端 user 结构不变，其他页面（自评 / 审核 / 汇总）无需改动
 export function mapUserFromDb(row) {
   if (!row) return null;
-  // 身份完全由 admin_type 决定（0=分管领导 1=组织委员 2=支部书记 3=普通党员）
+  // 身份完全由 admin_type 决定（0=支部书记 1=组织委员 2=党总支书记 3=普通党员）
   const adminType =
     row.admin_type == null ? ADMIN_TYPE_EMPLOYEE : Number(row.admin_type);
   // 兼容旧页面的 role 判断：只有普通党员算 employee，其余视为审核端(admin)
@@ -100,8 +100,10 @@ export function mapUserFromDb(row) {
 }
 
 // 前端注册表单 → 数据库列
-// 注意：admin_type 由后端按 work_id 白名单决定后写入，前端不再传 role
-export function toDbPayload({ username, password, name, workId, position, positionType, branch }) {
+// 注意：
+//   - admin_type 由后端按 work_id 白名单决定后写入，前端不再传 role
+//   - branch 不再由注册页采集：后端按「工作证编号 → 白名单」取所在党支部落库
+export function toDbPayload({ username, password, name, workId, position, positionType }) {
   return {
     user_id: username,
     pw: password,
@@ -109,7 +111,6 @@ export function toDbPayload({ username, password, name, workId, position, positi
     work_id: workId,
     type: positionType,
     job: position,
-    branch,
   };
 }
 
@@ -122,7 +123,8 @@ export async function registerUser(values) {
 
   if (isMockMode()) {
     // mock 模式无后端白名单：一律按普通党员(3)落库，便于本地跑通
-    const row = { ...payload, admin_type: ADMIN_TYPE_EMPLOYEE };
+    //   branch 认不到（本地没有白名单），落到第一党支部，保证 mock 里列表有数据
+    const row = { ...payload, branch: 'first', admin_type: ADMIN_TYPE_EMPLOYEE };
     const res = mockRegister(row);
     return { ...res, user: mapUserFromDb(res.user) };
   }

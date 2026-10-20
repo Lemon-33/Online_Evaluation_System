@@ -56,24 +56,28 @@ const splitWorkIds = (s) =>
 // 身份下拉：去掉 ADMIN_TYPE_SYSTEM = 9（防误把普通用户加成系统管理员；
 // 真要加 9 走专门逻辑更安全，这里先屏蔽）
 const ADMIN_TYPE_OPTIONS = [
-  { value: 0, label: '0 · 分管领导' },
+  { value: 0, label: '0 · 支部书记' },
   { value: 1, label: '1 · 组织委员' },
-  { value: 2, label: '2 · 支部书记' },
+  { value: 2, label: '2 · 党总支书记' },
   { value: 3, label: '3 · 普通党员' },
+  { value: 4, label: '4 · 分管领导' },
 ];
 
 // 员工信息维护 Tab =====================================================
 // 导出给主应用侧边栏的 /user-admin 页复用（见 pages/UserAdmin.jsx）；
 // 系统管理员的 /backdoor 页也用它 —— 同一份实现，没有复制代码
-// allowCreate：这一页是否允许「新建用户」。
-//   只有系统管理员的 /backdoor 页会传 true；侧边栏的 /user-admin（被授权人 / 支部书记用）
-//   一律 false —— 那一页只能维护已有员工，新建入口从 UI 上就不出现。
-//   ⚠️ 后端 /api/backdoor/users 有对应的硬闸门（INSERT 只放系统管理员），前端只是体验层。
-export function UserManagementTab({ users, reload, allowCreate = false }) {
+//
+// 2026-10-19 调整：
+//   · 不再支持「新建账号」：服务端 POST /api/backdoor/users 已移除 INSERT 分支
+//     （以前还能"打一个不存在的工号"就建新号，现在只能改已有记录）
+//   · 系统管理员在表单里**可以改工号**：服务端以 originalWorkId 定位行 + 新工号落库
+//   · 其它被授权账号不能改工号（前端不变，全部交给后端闸门判）
+//   · 旧参数 allowCreate 取消
+export function UserManagementTab({ users, reload }) {
   const { user } = useAuth();
-  // 「身份」只有系统管理员(9) / 支部书记(2) 能改；其余被授权账号进来只能看、不能动这一项
-  const canEditAdminType =
-    user?.adminType === ADMIN_TYPE_SYSTEM || user?.adminType === ADMIN_TYPE_SECRETARY;
+  // 「身份」只有系统管理员(9) 能改；2026-10-19 起撤销党总支书记的例外——
+  //   提权/撤权是最敏感的权限点，统一走系统管理员这一条道；其余被授权账号进来只读
+  const canEditAdminType = user?.adminType === ADMIN_TYPE_SYSTEM;
   const [form] = Form.useForm();
   // 单框定位：姓名或工号（与「权限管理」页同一套交互）
   //   keyword = 框里的原始文本；resolvedWorkId = 解析出来的工号（解析不出 → null）
@@ -137,7 +141,9 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
     return list.map((x) => ({ value: x.value, label: x.label }));
   }, [currentType]);
 
-  // ===== 解析出工号 → 加载用户到表单；解析不出 → 新建模式（仅 allowCreate）=====
+  // ===== 解析出工号 → 加载用户到表单；匹配不到 → 表单清空（不再"新建"）=====
+  //   originalWorkId 由表单 hidden 字段记录，作为后端定位行的唯一锚点
+  //   （form.setFieldsValue 时一并填入；用户改 work_id 时它不变）
   useEffect(() => {
     const raw = String(keyword || '').trim();
     if (!raw) {
@@ -149,6 +155,8 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
       const u = users.find((x) => x.work_id === resolvedWorkId);
       if (u) {
         form.setFieldsValue({
+          // 隐藏字段：用来告诉后端"我改的是哪一行"
+          originalWorkId: u.work_id,
           user_id: u.user_id,
           pw: '',
           name: u.name,
@@ -162,11 +170,10 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
         return;
       }
     }
-    // 匹配不到任何人：有新建权限 → 把框里的原文当新工号，进新建模式；否则清空表单
+    // 匹配不到任何人 —— 不再有"新建模式"概念；只清空表单
     form.resetFields();
-    if (allowCreate) form.setFieldsValue({ work_id: raw });
     setLoadedWorkId(null);
-  }, [keyword, resolvedWorkId, users, form, allowCreate]);
+  }, [keyword, resolvedWorkId, users, form]);
 
   const onSubmit = async (values) => {
     const workId = String(values.work_id || '').trim();
@@ -174,25 +181,18 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
       message.error('工号不能为空');
       return;
     }
-    // 表单中的工号 vs 当前选中工号：可能用户编辑时改了工号
-    // 只要 work_id 已存在 → UPDATE；否则 → INSERT（无白名单）
-    const isNew = !users.some((u) => u.work_id === workId);
-
-    // 兜底：表单里的「工号」框理论上改不了一个不存在的工号（下面已置灰），
-    // 但这里再拦一道，确保没有新建权限的页面绝不会走到 INSERT
-    if (isNew && !allowCreate) {
-      message.error('本页只能修改已有员工；新建用户请到系统管理员后门操作');
-      return;
-    }
-
-    if (isNew && !values.pw) {
-      message.error('新建用户必须填写登录密码');
+    // 必先加载一个用户才能保存（原工号 hidden 字段是后端定位行的唯一锚点）
+    const origWid = String(values.originalWorkId || '').trim();
+    if (!origWid) {
+      message.error('请先在「查询 / 加载用户」区加载要修改的用户');
       return;
     }
 
     setSaving(true);
     try {
       const body = {
+        // 必传：被修改行的"原工号"
+        originalWorkId: origWid,
         user_id: String(values.user_id || '').trim(),
         name: String(values.name || '').trim(),
         work_id: workId,
@@ -201,7 +201,7 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
         job: values.job || null,
         branch: values.branch,
       };
-      // 修改时：留空密码 = 不改；只在新模式 / 显式填了密码时传 pw
+      // 留空 = 不改密码；显式填了才覆盖
       if (values.pw) body.pw = String(values.pw);
 
       const res = await apiRequest('/api/backdoor/users', {
@@ -209,9 +209,10 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
         body: JSON.stringify(body),
       });
       if (res.code === 'OK') {
-        message.success(isNew ? '已新建用户' : '已修改用户');
+        message.success('已保存');
         await reload();
-        // 切到「已加载」状态（无论是新建还是修改）
+        // 把 originalWorkId 同步到新工号，否则再保存时还是改的"老行"定位
+        form.setFieldValue('originalWorkId', workId);
         setKeyword(workId);
         form.setFieldValue('pw', '');
       } else {
@@ -295,9 +296,8 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
           查询 / 加载用户
         </Title>
         <Text type="secondary">
-          {allowCreate
-            ? '在一个框里输入姓名或工号定位用户 → 下方表单自动加载。输入「不存在的工号」则进入新建模式。'
-            : '在一个框里输入姓名或工号定位用户 → 下方表单自动加载，改完点保存即可。本页只能维护已有员工，不能新建账号。'}
+          在一个框里输入姓名或工号定位用户 → 下方表单自动加载，
+          改完点「保存」即修改该员工。本页只能修改已有员工，不能新建账号。
         </Text>
         <Row gutter={16} style={{ marginTop: 16 }}>
           <Col xs={24} sm={12} md={8}>
@@ -362,19 +362,10 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
           }}
         >
           <Title level={4} style={{ margin: 0 }}>
-            {!allowCreate
-              ? '编辑用户'
-              : isLoadedExisting
-              ? '编辑用户'
-              : loadedWorkId === null && currentWorkId
-              ? '新建用户'
-              : '编辑 / 新建'}
+            编辑用户
           </Title>
           <Space>
             {isLoadedExisting && <Tag color="blue">已加载</Tag>}
-            {allowCreate && !isLoadedExisting && currentWorkId && (
-              <Tag color="green">新建模式</Tag>
-            )}
             {/* 系统管理员标签用 geekblue（与 constants.js 的 ADMIN_TYPE_META 一致，不用红） */}
             {isSystemUser && <Tag color="geekblue">系统管理员</Tag>}
           </Space>
@@ -407,14 +398,10 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
                     },
                   },
                 ]}
-                extra={
-                  isLoadedExisting || !allowCreate
-                    ? '留空 = 不修改原密码；填了则覆盖'
-                    : '新建用户：必填（至少 4 位）'
-                }
+                extra="留空 = 不修改原密码；填了则覆盖（至少 4 位）"
               >
                 <Input.Password
-                  placeholder={isLoadedExisting ? '不修改请留空' : '请输入初始密码'}
+                  placeholder="不修改请留空"
                   autoComplete="new-password"
                 />
               </Form.Item>
@@ -432,19 +419,20 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
+              {/* 工号：始终可编辑（不再是"新建工号"的新建模式，而是改名）
+                  · 其它被授权账号：后端拒绝改（前端提示）
+                  · 系统管理员：可以改，但新工号不能撞别人 */}
               <Form.Item
                 name="work_id"
                 label="工号（work_id）"
                 rules={[{ required: true, message: '请填写工号' }]}
                 extra={
-                  !allowCreate
-                    ? '工号不可修改：改工号等于新建一条记录'
-                    : isLoadedExisting
-                    ? '改工号 = 给新工号建一条新记录，原记录保留'
-                    : '新建用户时：填入要使用的工号（已存在则改为更新）'
+                  canEditAdminType
+                    ? '系统管理员可改工号：填新工号后保存即把这条记录的 work_id 改成新值；新工号不能与他人重复。'
+                    : '工号只有系统管理员可以修改；其它账号改动会被后端拒绝。'
                 }
               >
-                <Input placeholder="如 W-0001" disabled={!allowCreate} />
+                <Input placeholder="如 W-0001" />
               </Form.Item>
             </Col>
           </Row>
@@ -458,7 +446,7 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
                 extra={
                   canEditAdminType
                     ? undefined
-                    : '身份只有系统管理员或支部书记可以修改；本页其余信息可正常维护'
+                    : '身份只有系统管理员可以修改；本页其余信息可正常维护'
                 }
               >
                 <Select
@@ -493,6 +481,11 @@ export function UserManagementTab({ users, reload, allowCreate = false }) {
               </Form.Item>
             </Col>
           </Row>
+
+          {/* 隐藏字段：被修改行的"原工号"，后端靠它定位行；保存后会自动同步到新工号 */}
+          <Form.Item name="originalWorkId" hidden>
+            <Input />
+          </Form.Item>
 
           <Row gutter={16}>
             <Col xs={24} md={12}>
@@ -1429,7 +1422,7 @@ export default function Backdoor() {
                   员工信息维护
                 </span>
               ),
-              children: <UserManagementTab users={users} reload={reload} allowCreate />,
+              children: <UserManagementTab users={users} reload={reload} />,
             },
             {
               key: 'review-assignments',

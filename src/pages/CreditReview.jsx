@@ -13,12 +13,15 @@ import {
   Table,
   Tag,
   message,
+  Modal,
 } from 'antd';
 import {
   AuditOutlined,
   BellOutlined,
   CheckCircleOutlined,
-  RiseOutlined,
+  WarningOutlined,
+  EyeOutlined,
+  CopyOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -28,10 +31,10 @@ import {
   findLabel,
   findPositionLabel,
 } from '../lib/constants';
-import { listCredits } from '../lib/cloudbase';
+import { listCredits, getCreditUnsubmittedCount } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
 
-// 年度专项加分审核（支部书记 admin_type=2 / 分管领导 admin_type=0）
+// 年度专项加分审核（党总支书记 admin_type=2 / 支部书记 admin_type=0）
 // ------------------------------------------------------------
 // 模式与「履职贡献评价审核」/「年度红线扣分审核」一致：
 //   顶部身份 banner + 三张统计卡片 + 筛选区 + 列表 + 「评分 / 查看 · 重审」按钮
@@ -40,8 +43,8 @@ import { useAuth } from '../context/AuthContext';
 //     该年度没人申报 → 列表就是空的，显示「暂无待审核的专项加分记录」
 //   - 分数是加分（≥ 0），列表里展示成「+X 分」
 // 可见范围（后端强制）：
-//   - 支部书记 → 全部支部（可跨支部审核）
-//   - 分管领导 → 仅自己支部
+//   - 党总支书记 → 全部支部（可跨支部审核）
+//   - 支部书记 → 仅自己支部
 export default function CreditReview() {
   const { user } = useAuth();
   const nav = useNavigate();
@@ -53,6 +56,10 @@ export default function CreditReview() {
   const [loading, setLoading] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [reviewedCount, setReviewedCount] = useState(0);
+  // 未申报人数（第三张卡片）+ 未申报名单（弹窗），范围由后端按身份限定
+  const [unsubmittedCount, setUnsubmittedCount] = useState(0);
+  const [unsubList, setUnsubList] = useState([]);
+  const [unsubOpen, setUnsubOpen] = useState(false);
 
   const yearOptions = useMemo(() => {
     const nowY = new Date().getFullYear();
@@ -64,10 +71,12 @@ export default function CreditReview() {
   const reload = async () => {
     setLoading(true);
     try {
-      const [data, p, r] = await Promise.all([
+      const [data, p, r, unsub] = await Promise.all([
         listCredits({ year, status, keyword }),
         listCredits({ year, status: 'pending' }),
         listCredits({ year, status: 'reviewed' }),
+        // 未申报人数：年度口径，不随 status / keyword 变化
+        getCreditUnsubmittedCount({ year }),
       ]);
       // 待审核优先排前面，已审核往后挪
       const sorted = [...data].sort(
@@ -78,6 +87,8 @@ export default function CreditReview() {
       setList(sorted);
       setPendingCount(p.length);
       setReviewedCount(r.length);
+      setUnsubmittedCount(unsub?.unsubmitted || 0);
+      setUnsubList(unsub?.list || []);
     } catch (e) {
       console.error(e);
       message.error('加载数据失败');
@@ -100,6 +111,25 @@ export default function CreditReview() {
   // 点击「评分」/「查看 · 重审」：跳到该条记录的审核页
   const openReview = (rec) => {
     nav(`/credit-review/${rec.id}`, { state: { record: rec } });
+  };
+
+  // 复制未申报名单（http 环境下 clipboard API 可能不可用 → 传统方案兜底）
+  // 与「履职贡献评价审核」页同一套交互（均为一行一个姓名、可一键复制）
+  const copyUnsubList = async () => {
+    const text = unsubList.map((u) => u.name).join('\r\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success(`已复制 ${unsubList.length} 个姓名`);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) message.success(`已复制 ${unsubList.length} 个姓名`);
+      else message.warning('复制失败，请在弹窗里手动全选复制');
+    }
   };
 
   // 项目规范：表格所有列（含表头）一律居中 —— align: 'center'
@@ -182,24 +212,19 @@ export default function CreditReview() {
         message={
           <Space>
             <span style={{ fontWeight: 600 }}>年度专项加分审核</span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
-            {/* 支部书记：可跨支部审核（全部支部）；分管领导：只看自己支部 */}
+            {/* 党总支书记：可跨支部审核（全部支部）；支部书记：只看自己支部 */}
             <Tag color="gold">
               审核范围：{isSecretary ? '全部支部' : findBranchLabel(user?.branch)}
             </Tag>
           </Space>
         }
-        description="逐条核定党员申报的年度专项加分：给出核定加分与审核意见，提交后计入该年度总分。记录由本人申报产生，当年无人申报时列表为空。"
         style={{ marginBottom: 16 }}
       />
 
       {/* 统计卡片：跟随上方年度筛选 */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={8}>
-          <Card>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -209,12 +234,12 @@ export default function CreditReview() {
               }
               value={pendingCount}
               suffix="人"
-              valueStyle={{ color: pendingCount > 0 ? '#cf1322' : '#3f8600' }}
+              valueStyle={{ fontSize: 20, color: pendingCount > 0 ? '#cf1322' : '#3f8600' }}
             />
           </Card>
         </Col>
         <Col span={8}>
-          <Card>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -224,23 +249,38 @@ export default function CreditReview() {
               }
               value={reviewedCount}
               suffix="人"
-              valueStyle={{ color: '#3f8600' }}
+              valueStyle={{ fontSize: 20, color: '#3f8600' }}
             />
           </Card>
         </Col>
         <Col span={8}>
-          <Card>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
-                  <RiseOutlined />
-                  <span>当前列表</span>
+                  <WarningOutlined />
+                  <span>未申报人数</span>
                 </Space>
               }
-              value={list.length}
-              suffix="条"
-              valueStyle={{ color: '#1677ff' }}
+              value={unsubmittedCount}
+              suffix="人"
+              valueStyle={{
+                fontSize: 20,
+                color: unsubmittedCount > 0 ? '#fa541c' : '#3f8600',
+              }}
             />
+            {/* 有人没申报时提供「查看」入口（小弹窗展示名单，不离开列表页） */}
+            {unsubmittedCount > 0 && (
+              <Button
+                type="link"
+                size="small"
+                icon={<EyeOutlined />}
+                style={{ padding: 0, marginTop: 4 }}
+                onClick={() => setUnsubOpen(true)}
+              >
+                查看
+              </Button>
+            )}
           </Card>
         </Col>
       </Row>
@@ -281,6 +321,48 @@ export default function CreditReview() {
         pagination={{ pageSize: 10 }}
         locale={{ emptyText: <Empty description={emptyText} /> }}
       />
+
+      {/* 未申报名单弹窗：一行一个姓名，可鼠标全选复制，也可一键复制
+          （与「履职贡献评价审核」页保持一致） */}
+      <Modal
+        open={unsubOpen}
+        onCancel={() => setUnsubOpen(false)}
+        title={`${year} 年未申报名单（${unsubList.length} 人）`}
+        width={420}
+        footer={[
+          <Button
+            key="copy"
+            type="primary"
+            icon={<CopyOutlined />}
+            onClick={copyUnsubList}
+          >
+            复制全部
+          </Button>,
+        ]}
+      >
+        {unsubList.length > 0 ? (
+          <div
+            style={{
+              maxHeight: 360,
+              overflow: 'auto',
+              userSelect: 'text',
+              WebkitUserSelect: 'text',
+              whiteSpace: 'pre-line',
+              lineHeight: '28px',
+              fontSize: 14,
+              background: '#fafafa',
+              border: '1px solid #f0f0f0',
+              borderRadius: 6,
+              padding: '12px 16px',
+              cursor: 'text',
+            }}
+          >
+            {unsubList.map((u) => u.name).join('\n')}
+          </div>
+        ) : (
+          <Empty description="本年已全部申报" />
+        )}
+      </Modal>
     </div>
   );
 }

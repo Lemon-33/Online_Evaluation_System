@@ -4,6 +4,7 @@ import {
   ADMIN_TYPE_ORGANIZER,
   ADMIN_TYPE_SECRETARY,
   ADMIN_TYPE_EMPLOYEE,
+  ADMIN_TYPE_DIRECTOR,
   ADMIN_TYPE_SYSTEM,
 } from '../lib/constants';
 import { registerUser, loginUser, loginBackdoor, logoutUser } from '../lib/userService';
@@ -44,13 +45,10 @@ export function AuthProvider({ children }) {
     workId,
     position,
     positionType,
-    branch,
   }) => {
+    // 注：branch 不再由注册页采集 —— 后端按「工作证编号 → 白名单」取所在党支部落库
     if (!username || !password || !realName || !workId) {
       throw new Error('请填写完整的注册信息');
-    }
-    if (!branch) {
-      throw new Error('必须选择所在党支部');
     }
     // 身份、以及「岗位类型是否必填」均由后端按工号白名单判定，前端不做预校验
     let res;
@@ -62,7 +60,6 @@ export function AuthProvider({ children }) {
         workId,
         position,
         positionType,
-        branch,
       });
     } catch (e) {
       throw new Error(e.message || '网络异常，注册失败，请稍后重试');
@@ -155,8 +152,9 @@ export function AuthProvider({ children }) {
       // 权限判断：身份完全由 adminType 决定
       //   普通党员(3) → 自评 / 查看基础评分 / 个人积分查询 / [有审核对象] 履职积分审核
       //   组织委员(1) → 普通用户全部 + 基础积分评价
-      //   分管领导(0) → 履职积分审核
-      //   支部书记(2) → 履职积分审核（恒有入口，范围=被指派的人）+ 基础积分评价（全体）
+      //   分管领导(4) → 履职积分审核（恒有入口，范围=被指派的人；不参与其它任何模块）
+      //   支部书记(0) → 履职积分审核
+      //   党总支书记(2) → 履职积分审核（恒有入口，范围=被指派的人）+ 基础积分评价（全体）
       can: (action) => {
         if (!user) return false;
         const at = user.adminType;
@@ -164,11 +162,12 @@ export function AuthProvider({ children }) {
         const isOrganizer = at === ADMIN_TYPE_ORGANIZER;
         const isSecretary = at === ADMIN_TYPE_SECRETARY;
         const isEmployee = at === ADMIN_TYPE_EMPLOYEE;
+        const isDirector = at === ADMIN_TYPE_DIRECTOR;
         const selfEval = isOrganizer || isEmployee; // 可提交履职贡献自评
-        // 履职积分审核入口：分管领导 / 支部书记恒有；其他人被指派了审核对象才有
-        //   注意「有入口」≠「有数据」：支部书记的审核范围仍完全由 review_assignment 决定，
+        // 履职积分审核入口：分管领导 / 支部书记 / 党总支书记恒有；其他人被指派了审核对象才有
+        //   注意「有入口」≠「有数据」：这些人的审核范围仍完全由 review_assignment 决定，
         //   刚注册时该表为空 → 进得去审核页，但列表是空的
-        const canReview = isLeader || isSecretary || !!user.hasReviewTargets;
+        const canReview = isLeader || isSecretary || isDirector || !!user.hasReviewTargets;
 
         if (action === 'self') return selfEval;
         // 党员自我评价提交（提交类入口总页）：普通党员 / 组织委员
@@ -180,11 +179,13 @@ export function AuthProvider({ children }) {
         if (action === 'basicRating') return isOrganizer || isSecretary;
         if (action === 'deductRating') return isOrganizer || isSecretary;
         if (action === 'scoreQuery') return selfEval;      // 个人积分查询（普通用户）
-        // 积分汇总：组织委员 / 支部书记 / 分管领导（可见范围由后端按身份限定）
+        // 积分汇总：组织委员 / 党总支书记 / 支部书记（可见范围由后端按身份限定）
         if (action === 'scoreSummary') return isOrganizer || isSecretary || isLeader;
-        // 年度红线扣分审核：分管领导 / 支部书记（各自只审自己支部）
+        // 支部积分查询：仅分管领导（复用「支部积分汇总」页面，可在两个支部 / 全体成员间切换）
+        if (action === 'branchScoreQuery') return isDirector;
+        // 年度红线扣分审核：支部书记 / 党总支书记（各自只审自己支部）
         if (action === 'redline') return isLeader || isSecretary;
-        // 年度专项加分审核：分管领导 / 支部书记（数据来自 credit 表，谁申报审谁）
+        // 年度专项加分审核：支部书记 / 党总支书记（数据来自 credit 表，谁申报审谁）
         if (action === 'creditReview') return isLeader || isSecretary;
         if (action === 'basicRatingView') return selfEval; // 查看基础评分（普通用户）
         // 系统维护工具：登录时由后端下发的标记（默认全员 false，即入口对所有账号隐藏）

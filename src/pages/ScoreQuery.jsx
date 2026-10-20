@@ -34,6 +34,7 @@ import {
   getMyCredit,
   getMyAnnualRank,
 } from '../lib/cloudbase';
+import { isMonthOpen, isFutureMonth, EVAL_OPEN_FROM_LABEL } from '../lib/constants';
 
 // 月度下拉：1-12 + "全年"
 const MONTH_OPTIONS = [
@@ -203,11 +204,6 @@ export default function ScoreQuery() {
     };
   }, [user, year, isAll]);
 
-  const rangeLabel = useMemo(
-    () => (isAll ? `${year} 年（全年）` : `${year} 年 ${month} 月`),
-    [year, month, isAll]
-  );
-
   return (
     <div>
       <Title level={3} style={{ marginTop: 0 }}>
@@ -237,7 +233,6 @@ export default function ScoreQuery() {
               style={{ width: 120 }}
             />
           </Space>
-          <Tag color="blue">{rangeLabel}</Tag>
         </Space>
       </Card>
 
@@ -289,6 +284,16 @@ function MonthlyView({ data, year, month, selfEval, basicReviewed }) {
   //   统一跳「每月履职贡献自评」页并带上当前查看的年月，那边按状态给可编辑 / 只读表单
   const reviewed = selfEval?.reviewStatus === 'reviewed';
   const selfLabel = !selfEval ? '提交自评' : reviewed ? '查看评价' : '修改自评';
+  // 该月自评入口是否可用：可提交范围 = [2026-10（下界）, 当前月（上界）]
+  //   早于下界 → 已封档；晚于上界 → 尚未开启。两种都置灰，但悬停提示不同
+  const monthOpen = isMonthOpen(year, month);
+  const futureMonth = isFutureMonth(year, month);
+  const selfDisabled = !monthOpen || futureMonth;
+  const selfTip = !monthOpen
+    ? `${year} 年 ${month} 月已封档（可提交范围：${EVAL_OPEN_FROM_LABEL} 起）`
+    : futureMonth
+    ? `${year} 年 ${month} 月尚未开启，未到提交时间`
+    : '';
   const goSelfEval = () => nav('/self', { state: { year, month } });
   return (
     <Row gutter={16} style={{ marginTop: 8 }}>
@@ -327,15 +332,20 @@ function MonthlyView({ data, year, month, selfEval, basicReviewed }) {
             suffix="分"
             valueStyle={{ color: '#000' }}
           />
-          {/* 去「每月履职贡献自评」：文案随当月状态变化（提交 / 修改 / 查看） */}
-          <Button
-            type="link"
-            icon={reviewed ? <FileSearchOutlined /> : <EditOutlined />}
-            style={{ paddingLeft: 0, marginTop: 4 }}
-            onClick={goSelfEval}
-          >
-            {selfLabel}
-          </Button>
+          {/* 去「每月履职贡献自评」：文案随当月状态变化（提交 / 修改 / 查看）
+              已封档的月份（2026 年 9 月及以前）/ 未开启的未来月份 → 置灰不可点，
+              悬停说明原因（封档 vs 尚未开启，两种提示不同） */}
+          <Tooltip title={selfTip}>
+            <Button
+              type="link"
+              icon={reviewed ? <FileSearchOutlined /> : <EditOutlined />}
+              disabled={selfDisabled}
+              style={{ paddingLeft: 0, marginTop: 4 }}
+              onClick={goSelfEval}
+            >
+              {selfLabel}
+            </Button>
+          </Tooltip>
         </Card>
       </Col>
       <Col xs={24} sm={12} lg={6}>
@@ -475,7 +485,7 @@ function AnnualView({ data, year, redlineReviewed, credit, rank }) {
               prefix={<FallOutlined />}
               valueStyle={{ color: '#000' }}
             />
-            {/* 查看该年度分管领导 / 支部书记核定的红线扣分卷子（只读）
+            {/* 查看该年度支部书记 / 党总支书记核定的红线扣分卷子（只读）
                 该年度红线还没核定（无记录 / 待核定）→ 置灰不可点，悬停说明原因 */}
             <Tooltip
               title={redlineReviewed ? '' : `${year} 年红线扣分尚未核定，暂无卷子可看`}

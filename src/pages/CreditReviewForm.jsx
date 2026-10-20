@@ -54,7 +54,7 @@ import { useAuth } from '../context/AuthContext';
 
 const { Text } = Typography;
 
-// 单条年度专项加分审核页（分管领导 / 支部书记）
+// 单条年度专项加分审核页（支部书记 / 党总支书记）
 // ------------------------------------------------------------
 // 从审核列表点「审核」/「查看 · 重审」进入（/credit-review/:id）：
 //   ① 左栏就是那张**申报卷子**，但**可编辑** —— 审核人可以改申请人填的选项（有 / 无）、
@@ -295,7 +295,8 @@ export default function CreditReviewForm() {
 
       <Row gutter={16}>
         {/* 左侧：可编辑的申报卷子 */}
-        <Col span={16}>
+        {/* 窄屏（<768px）左栏整行，右栏（核定加分 / 审核意见）掉到下面 */}
+        <Col span={16} xs={24} md={16}>
           {sections.map((sec) => (
             <Card
               key={sec.key}
@@ -411,7 +412,7 @@ export default function CreditReviewForm() {
         </Col>
 
         {/* 右侧：自动算出的核定加分 + 审核意见 */}
-        <Col span={8}>
+        <Col span={8} xs={24} md={8}>
           <Card
             title={
               <Space>

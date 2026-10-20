@@ -113,6 +113,16 @@ export default function App({ mockMode }) {
               </RequireRole>
             }
           />
+          {/* 支部积分查询：仅分管领导可见，复用「支部积分汇总」页面实现
+              （只是菜单文案与路由不同，筛选同样是「第一 / 第二党支部 / 全体成员」） */}
+          <Route
+            path="/branch-score-query"
+            element={
+              <RequireRole perm="branchScoreQuery">
+                <ScoreSummary title="支部积分查询" />
+              </RequireRole>
+            }
+          />
           {/* 基础积分评价详情：入口不是侧边栏常驻菜单，
               而是「个人积分查询 → 选某月 → 查看评价」，所以路由必须带 :year/:month
               （不带参数的旧兼容路由已删除：当前仍在测试期，没有老用户/老书签） */}
@@ -169,7 +179,7 @@ export default function App({ mockMode }) {
               </RequireRole>
             }
           />
-          {/* 年度红线扣分审核（分管领导）：列表 + 问卷页 */}
+          {/* 年度红线扣分审核（支部书记）：列表 + 问卷页 */}
           <Route
             path="/redline-review"
             element={
@@ -195,7 +205,7 @@ export default function App({ mockMode }) {
               </RequireRole>
             }
           />
-          {/* 年度专项加分审核（分管领导 / 支部书记）：列表 + 单条审核页 */}
+          {/* 年度专项加分审核（支部书记 / 党总支书记）：列表 + 单条审核页 */}
           <Route
             path="/credit-review"
             element={

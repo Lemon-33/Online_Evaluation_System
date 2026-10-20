@@ -14,10 +14,11 @@ import { UserManagementTab } from './Backdoor';
 //     · 后端 requireUserAdmin 放行 /api/backdoor/users 的写接口
 //     · 登录接口下发 canUserAdmin → 侧边栏菜单项出现、本页守卫放行
 //
-// ⚠️ 本页**只能维护已有员工，不能新建账号**（UserManagementTab 不传 allowCreate）：
-//     · 工号只能从下拉里选已有的人；表单里的工号框也置灰（改工号 = 新建一条记录）
-//     · 「身份」下拉只有系统管理员 / 支部书记能点，其余账号置灰并给出说明
-//     · 新建账号只在系统管理员的 /backdoor 页里做（后端 INSERT 也只放系统管理员）
+// ⚠️ 本页**只能修改已有员工，不能新建账号**（2026-10-19 起彻底取消新建功能）：
+//     · 工号：仍**只**系统管理员能改；其它被授权账号改了会被后端拒绝
+//     · 身份（admin_type）：只有系统管理员能改（2026-10-19 起撤销党总支书记的例外）；
+//       其余被授权账号进来只读
+//     · 新建账号需要先在注册白名单里登记好，再在搜索框里输入该工号加载进来修改
 export default function UserAdmin() {
   const [users, setUsers] = useState([]);
 

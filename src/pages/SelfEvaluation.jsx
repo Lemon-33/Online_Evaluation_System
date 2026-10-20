@@ -38,9 +38,9 @@ import {
   resolveFormDef,
   buildPositionFormSnapshot,
   formDefFromSnapshot,
-  POSITION_TYPES,
-  findLabel,
-  findPositionLabel,
+  isMonthOpen,
+  isFutureMonth,
+  EVAL_OPEN_FROM_LABEL,
 } from '../lib/constants';
 import {
   getMyEvaluation,
@@ -49,6 +49,7 @@ import {
   getFormOverride,
 } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
+import { useIsMobile } from '../lib/useIsMobile';
 
 export default function SelfEvaluation() {
   const { user } = useAuth();
@@ -59,13 +60,22 @@ export default function SelfEvaluation() {
   const goBack = () => (loc.key && loc.key !== 'default' ? nav(-1) : nav('/self-center'));
   // 从「个人积分查询」的「提交 / 修改 / 查看自评」链接进来时带上所查的年月，
   // 直接落到那个月（否则默认当前月，用户还得自己切一次）
-  const passedYear = Number(loc.state?.year) || dayjs().year();
-  const passedMonth = Number(loc.state?.month) || dayjs().month() + 1;
+  const nowYear = dayjs().year();
+  const nowMonth = dayjs().month() + 1;
+  const passedYear = Number(loc.state?.year) || nowYear;
+  const passedMonthRaw = Number(loc.state?.month) || nowMonth;
+  // 可提交范围 = [2026-10（起点）, 当前月]：带过来的年月落在范围外
+  //   （早于起点 = 已封档；晚于当前月 = 未来月）→ 回落到当前年月，
+  //   避免一进来就停在既不能提交、也不能改动的月份上
+  const inRange = (y, m) =>
+    isMonthOpen(y, m) && !(y > nowYear || (y === nowYear && m > nowMonth));
+  const passedOk = inRange(passedYear, passedMonthRaw);
+  const passedMonth = passedOk ? passedMonthRaw : nowMonth;
   // 自评页仅 admin_type∈{1,3}（普通党员 / 组织委员）使用，始终按「被评人」处理：
   // 「履职扣分」段只在已审核时回显，不做可编辑展示（故恒为 false）
   const isAdmin = false;
   const [form] = Form.useForm();
-  const [year, setYear] = useState(passedYear);
+  const [year, setYear] = useState(passedOk ? passedYear : nowYear);
   const [month, setMonth] = useState(passedMonth);
   const [existing, setExisting] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -82,10 +92,10 @@ export default function SelfEvaluation() {
   const [monthRecords, setMonthRecords] = useState({});
 
   // 提交时间不允许晚于当前月份（如今天是 2026-10-13，则 2026-11 及以后不可选）
-  const isFutureMonth = (y, m) => {
-    const now = dayjs();
-    return y > now.year() || (y === now.year() && m > now.month() + 1);
-  };
+  //   判定统一走 constants.isFutureMonth（与「个人积分查询」同一份真源）
+  // 早于可评起点的月份（2026 年 9 月及以前）已封档 → 同样不可选。
+  //   注：isMonthOpen 是「下界」、isFutureMonth 是「上界」，两者合起来才是可选范围
+  const isClosedMonth = (y, m) => !isMonthOpen(y, m);
 
   // 评价周期从 2026 年开始；未来年份不允许提交，因此最多到当前年
   const years = useMemo(() => {
@@ -224,11 +234,16 @@ export default function SelfEvaluation() {
       return;
     }
     try {
-      // 提交时间不能晚于当前月份（月份下拉里未来月份已禁用，此处兜底校验）
+      // 提交时间不能晚于当前月份（月历里未来月份已禁用，此处兜底校验）
       if (isFutureMonth(year, month)) {
         message.warning(
           `不能选择当前日期之后的月份提交（今天是 ${dayjs().format('YYYY年M月D日')}），请修改提交时间`
         );
+        return;
+      }
+      // 早于可评起点的月份已封档（月历里已置为不可选，此处兜底防止改状态 / 绕过前端提交）
+      if (isClosedMonth(year, month)) {
+        message.warning(`${EVAL_OPEN_FROM_LABEL}之前的月份已封档，不能提交自评`);
         return;
       }
 
@@ -333,6 +348,8 @@ export default function SelfEvaluation() {
   const locked = existing?.reviewStatus === 'reviewed';
   const reviewed = existing?.reviewStatus === 'reviewed';
   const pending = !!existing && !reviewed;
+  // 审过这条记录的审核人名单（后端累积、按工号去重；老数据为 null → 空数组回落单行显示）
+  const reviewers = Array.isArray(existing?.reviewers) ? existing.reviewers : [];
 
   // 已审核：统计 + 渲染审核人对前两段（基础履职 / 提质赋分）修改过的题目
   //   对比基准 = 员工原始自评（scores）vs 审核定稿（reviewScores），不同的题目标注出来
@@ -395,6 +412,46 @@ export default function SelfEvaluation() {
     );
   };
 
+  const isMobile = useIsMobile();
+
+  // 「我的自评总分」+「提交」两张卡（已审核锁定后不显示）
+  //   桌面端：右栏「提交月历」下方（见 {!isMobile && bottomCards}）
+  //   窄屏：  移到**表单末尾** —— 表单很长，提交按钮留在最下面才顺手（填完往下点即可），
+  //           不能跟着右栏一起被提到表单上方。
+  const bottomCards = !locked ? (
+    <>
+      <Card
+        className="score-card"
+        style={{ marginTop: 16 }}
+        title={
+          <Space>
+            <StarFilled style={{ color: '#faad14' }} />
+            <span>我的自评总分</span>
+          </Space>
+        }
+      >
+        <Statistic value={total} valueStyle={{ color: '#b71c1c', fontSize: 36 }} />
+        <Divider style={{ margin: '12px 0' }} />
+        <div className="muted" style={{ fontSize: 12 }}>
+          * 提交后由管理员完成最终审核评分
+        </div>
+      </Card>
+
+      <Card title="提交" style={{ marginTop: 16 }}>
+        <Button
+          type="primary"
+          block
+          size="large"
+          loading={submitting}
+          onClick={onSubmit}
+          icon={<EditOutlined />}
+        >
+          {existing ? '更新自评' : '提交自评'}
+        </Button>
+      </Card>
+    </>
+  ) : null;
+
   return (
     <div>
       {/* 模式 banner：员工模式 */}
@@ -406,16 +463,8 @@ export default function SelfEvaluation() {
         message={
           <Space>
             <span style={{ fontWeight: 600 }}>党员自评模式</span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
-            <Tag color="purple">
-              {findPositionLabel(user?.position)} · {findLabel(POSITION_TYPES, user?.positionType)}
-            </Tag>
           </Space>
         }
-        description="您只能查看自己的评价记录与提交自我评价，无法访问其他党员的信息。"
         style={{ marginBottom: 16 }}
       />
 
@@ -448,25 +497,10 @@ export default function SelfEvaluation() {
         </Button>
       </div>
 
-      {/* 锁定提示 */}
-      {locked && (
-        <Alert
-          showIcon
-          type="success"
-          icon={<TrophyOutlined />}
-          style={{ marginBottom: 16 }}
-          message={`本次自评已由 ${existing.reviewerName || '审核人'} 完成，最终审核分为 ${existing.reviewScore} 分`}
-          description={
-            changedCount > 0
-              ? `自评内容已锁定，不可再修改。审核人修改了 ${changedCount} 处选项，对应题目已标注「审核人修改」；履职扣分见下方红色卡片。如需复核请联系所属支部管理员。`
-              : '自评内容已锁定，不可再修改。如需复核请联系所属支部管理员。'
-          }
-        />
-      )}
-
       <Form form={form} layout="vertical" disabled={locked} key={user?.name || 'guest'}>
         <Row gutter={16}>
-          <Col span={16}>
+          {/* 窄屏（<768px）左栏整行，右栏（月历 / 合计卡）掉到下面 */}
+          <Col span={16} xs={24} md={16}>
             {/* 基本信息已移至「个人信息」页（点击顶栏右上角姓名进入） */}
             {formDef ? (
               // 岗位专属表单：选择题模式，选项后直接标注分值
@@ -548,11 +582,11 @@ export default function SelfEvaluation() {
               <Card title="分项自评（总分 100）" style={{ marginTop: 16 }}>
                 {SCORE_DIMENSIONS.map((d) => (
                   <Row key={d.key} gutter={16} align="middle" style={{ marginBottom: 12 }}>
-                    <Col span={6}>
+                    <Col span={6} xs={24} md={6}>
                       <div style={{ fontWeight: 600 }}>{d.label}</div>
                       <div className="muted" style={{ fontSize: 12 }}>{d.desc}</div>
                     </Col>
-                    <Col span={12}>
+                    <Col span={12} xs={24} md={12}>
                       <Form.Item
                         name={['scores', d.key]}
                         rules={[
@@ -571,7 +605,7 @@ export default function SelfEvaluation() {
                         />
                       </Form.Item>
                     </Col>
-                    <Col span={6}>
+                    <Col span={6} xs={24} md={6}>
                       <InputNumber
                         min={0}
                         max={d.max}
@@ -587,9 +621,14 @@ export default function SelfEvaluation() {
                 ))}
               </Card>
             )}
+
+            {/* 窄屏：提交按钮跟到表单末尾（见 bottomCards 注释） */}
+            {isMobile && bottomCards}
           </Col>
 
-          <Col span={8}>
+          {/* 窄屏：右栏整块提到表单上方（Row 是 flex，order 生效），
+              这样「提交月历」「最终审核结果」不用滚过整个表单才看得到 */}
+          <Col span={8} xs={24} md={8} style={isMobile ? { order: -1 } : undefined}>
             {/* 提交月历：当年各月提交状态一览，点格子可直接切换月份 */}
             <Card
               title={
@@ -604,16 +643,20 @@ export default function SelfEvaluation() {
                   const m = i + 1;
                   const st = monthRecords[m];
                   const future = isFutureMonth(year, m);
+                  const closed = isClosedMonth(year, m); // 2026-09 及以前：已封档
+                  const disabled = future || closed;
                   const cls = [
                     'mini-cal-cell',
                     st === 'reviewed' ? 'is-done' : st === 'pending' ? 'is-pending' : '',
-                    future ? 'is-future' : '',
+                    disabled ? 'is-future' : '',
                     m === month ? 'is-cur' : '',
                   ]
                     .filter(Boolean)
                     .join(' ');
-                  const tip = future
-                    ? `${m} 月：未来月份，不可提交`
+                  const tip = closed
+                    ? `${m} 月：${EVAL_OPEN_FROM_LABEL}之前的月份已封档，不可提交`
+                    : future
+                    ? `${m} 月：尚未开启，未到提交时间`
                     : st === 'reviewed'
                     ? `${m} 月：已审核`
                     : st === 'pending'
@@ -623,7 +666,7 @@ export default function SelfEvaluation() {
                     <Tooltip key={m} title={tip}>
                       <div
                         className={cls}
-                        onClick={() => !future && setMonth(m)}
+                        onClick={() => !disabled && setMonth(m)}
                       >
                         {m}月
                       </div>
@@ -638,47 +681,13 @@ export default function SelfEvaluation() {
                 <span><i className="dot dot-future" />不可选</span>
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-                只能提交当前月份及之前的自评，点击月份可切换查看
+                可提交范围：{EVAL_OPEN_FROM_LABEL} 至当前月份；其余月份不可选，
+                点击可选月份可切换查看
               </div>
             </Card>
 
-            {/* 已审核后：隐藏「我的自评总分」和「提交」卡片（分数以「最终审核结果」卡片为准） */}
-            {!locked && (
-              <>
-                <Card
-                  className="score-card"
-                  style={{ marginTop: 16 }}
-                  title={
-                    <Space>
-                      <StarFilled style={{ color: '#faad14' }} />
-                      <span>我的自评总分</span>
-                    </Space>
-                  }
-                >
-                  <Statistic
-                    value={total}
-                    valueStyle={{ color: '#b71c1c', fontSize: 36 }}
-                  />
-                  <Divider style={{ margin: '12px 0' }} />
-                  <div className="muted" style={{ fontSize: 12 }}>
-                    * 提交后由管理员完成最终审核评分
-                  </div>
-                </Card>
-
-                <Card title="提交" style={{ marginTop: 16 }}>
-                  <Button
-                    type="primary"
-                    block
-                    size="large"
-                    loading={submitting}
-                    onClick={onSubmit}
-                    icon={<EditOutlined />}
-                  >
-                    {existing ? '更新自评' : '提交自评'}
-                  </Button>
-                </Card>
-              </>
-            )}
+            {/* 见下方 bottomCards：桌面端在右栏，窄屏移到表单末尾 */}
+            {!isMobile && bottomCards}
 
             {/* 已审核时：突出展示最终结果 */}
             {reviewed && (
@@ -709,8 +718,23 @@ export default function SelfEvaluation() {
                 <div style={{ marginTop: 4, color: 'rgba(0,0,0,0.85)' }}>
                   {existing.reviewComment || '（无）'}
                 </div>
+                {reviewers.length > 1 ? (
+                  <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+                    审核人（{reviewers.length} 位）：
+                    {reviewers.map((r, i) => (
+                      <span key={r.workId || i}>
+                        {i > 0 ? '、' : ''}
+                        {r.name || r.workId}（{r.at}）
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+                    审核人：{existing.reviewerName} · {existing.reviewedAt}
+                  </div>
+                )}
                 <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-                  审核人：{existing.reviewerName} · {existing.reviewedAt}
+                  自评内容已锁定，不可再修改。如需复核请联系所属支部管理员。
                 </div>
               </Card>
             )}

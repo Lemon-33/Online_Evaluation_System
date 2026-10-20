@@ -1,6 +1,6 @@
 // 基础积分评价详情（员工只读浏览自己某个月的扣分问卷）
 // ------------------------------------------------------------
-// 数据源：rating 表（由组织委员 / 支部书记填写）
+// 数据源：rating 表（由组织委员 / 党总支书记填写）
 // 问卷内容：DEDUCTION_SECTIONS 扣分问卷（同组织委员那边的题目）
 // 仅做"自己 / 自己当月" 的只读展示：题目 + 审核人选项 + 最终得分，
 // 不允许修改。未来的月份不可选。
@@ -165,16 +165,8 @@ export default function BasicRatingView() {
             <span style={{ fontWeight: 600 }}>
               基础积分评价详情 · {year} 年 {month} 月
             </span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
-            <Tag color="purple">
-              {findPositionLabel(user?.position)} · {findLabel(POSITION_TYPES, user?.positionType)}
-            </Tag>
           </Space>
         }
-        description="您只能查看自己的评价记录，无法访问其他党员的信息。"
         style={{ marginBottom: 16 }}
       />
 
@@ -211,7 +203,8 @@ export default function BasicRatingView() {
       <Spin spinning={loading}>
         <Row gutter={16}>
           {/* 左：员工/岗位信息 + 扣分问卷（只读） */}
-          <Col span={16}>
+          {/* 窄屏（<768px）左栏整行，右栏（分数卡）掉到下面 */}
+          <Col span={16} xs={24} md={16}>
             {record && (
               <Card style={{ marginBottom: 16 }}>
                 <Descriptions size="small" column={3} bordered>
@@ -253,7 +246,7 @@ export default function BasicRatingView() {
           </Col>
 
           {/* 右：最终评分（月份由路由给定，不再需要月历） */}
-          <Col span={8}>
+          <Col span={8} xs={24} md={8}>
             {/* 最终评分：与「履职积分自评」页的得分框一致，不 sticky，
                 随右栏内容正常排列（滚动时跟随页面一起走） */}
             <Card

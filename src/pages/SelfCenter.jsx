@@ -7,7 +7,6 @@ import {
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
-import { POSITION_TYPES, findLabel, findPositionLabel } from '../lib/constants';
 import { useAuth } from '../context/AuthContext';
 
 const { Text, Paragraph } = Typography;
@@ -41,13 +40,6 @@ export default function SelfCenter() {
         message={
           <Space wrap>
             <span style={{ fontWeight: 600 }}>党员自我评价提交</span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
-            <Tag color="purple">
-              {findPositionLabel(user?.position)} · {findLabel(POSITION_TYPES, user?.positionType)}
-            </Tag>
           </Space>
         }
         description="这里是你本人需要提交的评价内容：履职贡献自评每月一次，年度专项加分一年一次。完成后可在「个人积分查询」中查看自己的得分。"
@@ -67,10 +59,6 @@ export default function SelfCenter() {
                 每月提交一次
               </Text>
             </div>
-            <Paragraph style={{ fontSize: 13, color: 'rgba(0,0,0,0.65)', minHeight: 66 }}>
-              按当前岗位填写本月履职情况（含加分事项与具体事由），提交后由审核人核定；
-              审核完成前可以修改，审核完成后锁定。
-            </Paragraph>
             <div style={{ textAlign: 'center' }}>
               <Button type="primary" icon={<FileTextOutlined />} onClick={goSelfEval}>
                 进入提交
@@ -91,10 +79,6 @@ export default function SelfCenter() {
                 一年申报一次
               </Text>
             </div>
-            <Paragraph style={{ fontSize: 13, color: 'rgba(0,0,0,0.65)', minHeight: 66 }}>
-              申报本年度获得的荣誉表彰、技能竞赛、创新成果等加分事项，
-              由分管领导 / 支部书记核定后计入年度总分。
-            </Paragraph>
             <div style={{ textAlign: 'center' }}>
               <Button type="primary" icon={<RiseOutlined />} onClick={goCreditApply}>
                 进入提交

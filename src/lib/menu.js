@@ -47,6 +47,15 @@ export const MENU_ITEMS = [
     label: '支部积分汇总',
     icon: LineChartOutlined,
   },
+  // 支部积分查询：仅分管领导(4)可见，是它除「履职贡献评价审核」外的第二个模块。
+  //   页面实现**复用** ScoreSummary（路由 /branch-score-query 渲染同一个组件），
+  //   只是菜单文案按分管领导的口径叫「查询」—— 可在第一 / 第二党支部 / 全体成员之间切换。
+  {
+    key: '/branch-score-query',
+    perm: 'branchScoreQuery',
+    label: '支部积分查询',
+    icon: LineChartOutlined,
+  },
   // 注：「每月履职贡献自评」（/self）自 2026-10-16 起从侧边栏隐藏 ——
   //   入口已并入「党员自我评价提交」（上面的第一项），
   //   「个人积分查询 → 当月履职贡献积分 → 提交 / 修改 / 查看自评」也能直接进。
@@ -80,14 +89,14 @@ export const MENU_ITEMS = [
     label: '个人问卷维护',
     icon: ProfileOutlined,
   },
-  // 年度红线扣分审核（分管领导 / 支部书记可见）
+  // 年度红线扣分审核（支部书记 / 党总支书记可见）
   {
     key: '/redline-review',
     perm: 'redline',
     label: '年度红线扣分审核',
     icon: WarningOutlined,
   },
-  // 年度专项加分审核（分管领导 / 支部书记可见，读 credit 表）
+  // 年度专项加分审核（支部书记 / 党总支书记可见，读 credit 表）
   {
     key: '/credit-review',
     perm: 'creditReview',

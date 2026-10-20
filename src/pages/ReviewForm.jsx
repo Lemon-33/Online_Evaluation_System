@@ -279,13 +279,22 @@ export default function ReviewForm() {
     );
   }
 
+  // reviewed      = **记录级**：这条卷子有没有被审过（可能是别的审核人审的）
+  // myReviewed    = **我的审核状态**：我审过没有（后端按 reviewers 列派生）
+  //   两者不等价 —— 一个被审核人可以有多个审核人，别人审过不代表我审过。
   const reviewed = rec.reviewStatus === 'reviewed';
+  const myReviewed = rec.myReviewStatus === 'reviewed';
+  // 我审过、但之后被别的审核人覆盖 → 当前生效的不是我的那版
+  const lastReviewer =
+    Array.isArray(rec.reviewers) && rec.reviewers.length
+      ? rec.reviewers[rec.reviewers.length - 1]
+      : null;
 
   return (
     <div>
       {/* 顶部 banner：审核对象信息 */}
       <Alert
-        type={reviewed ? 'success' : 'warning'}
+        type={myReviewed ? 'success' : 'warning'}
         showIcon
         icon={<AuditOutlined />}
         message={
@@ -303,7 +312,7 @@ export default function ReviewForm() {
             <Tag color="blue">
               {rec.year} 年 {rec.month || 1} 月
             </Tag>
-            {reviewed ? (
+            {myReviewed ? (
               <Tag color="green" icon={<CheckCircleOutlined />}>
                 已审核
               </Tag>
@@ -315,8 +324,13 @@ export default function ReviewForm() {
           </Space>
         }
         description={
-          reviewed
-            ? `该记录已由 ${rec.reviewerName || '审核人'} 于 ${rec.reviewedAt || '-'} 审核得 ${rec.reviewScore} 分。您可以修改后重新提交，本次提交将覆盖上一次审核结果。`
+          myReviewed
+            ? `您已于 ${rec.reviewedAt || '-'} 审核得 ${rec.reviewScore} 分，可以修改后重新提交。` +
+              (rec.overriddenByOther && lastReviewer
+                ? `注意：此后 ${lastReviewer.name || lastReviewer.workId} 又审核过并覆盖了结果，当前生效的是对方的版本。`
+                : '')
+            : reviewed
+            ? `该记录已由 ${rec.reviewerName || '审核人'} 于 ${rec.reviewedAt || '-'} 审核得 ${rec.reviewScore} 分，但**您尚未审核**。请填写后提交，本次提交将覆盖对方的结果。`
             : '前两部分已按员工自评答案填入，可修改；「履职扣分」部分由您填写，右侧实时计算最终审核分。'
         }
         style={{ marginBottom: 16 }}
@@ -324,7 +338,8 @@ export default function ReviewForm() {
 
       <Form form={form} layout="vertical">
         <Row gutter={16}>
-          <Col span={16}>
+          {/* 窄屏（<768px）左栏整行，右栏（被审核人信息 / 合计卡）掉到下面 */}
+          <Col span={16} xs={24} md={16}>
             {formDef ? (
               // 岗位专属表单：与员工自评界面同构，三段全部展示
               formDef.sections.map((sec) => {
@@ -416,13 +431,13 @@ export default function ReviewForm() {
                     align="middle"
                     style={{ marginBottom: 12 }}
                   >
-                    <Col span={6}>
+                    <Col span={6} xs={24} md={6}>
                       <div style={{ fontWeight: 600 }}>{d.label}</div>
                       <div className="muted" style={{ fontSize: 12 }}>
                         {d.desc}
                       </div>
                     </Col>
-                    <Col span={12}>
+                    <Col span={12} xs={24} md={12}>
                       <Form.Item
                         name={['scores', d.key]}
                         rules={[
@@ -445,7 +460,7 @@ export default function ReviewForm() {
                         />
                       </Form.Item>
                     </Col>
-                    <Col span={6}>
+                    <Col span={6} xs={24} md={6}>
                       <InputNumber
                         min={0}
                         max={d.max}
@@ -465,7 +480,7 @@ export default function ReviewForm() {
             )}
           </Col>
 
-          <Col span={8}>
+          <Col span={8} xs={24} md={8}>
             {/* 被审核人信息 */}
             <Card title="被审核人">
               <Descriptions size="small" column={1} bordered>
@@ -583,7 +598,7 @@ export default function ReviewForm() {
                   onClick={onSubmit}
                   icon={<AuditOutlined />}
                 >
-                  {reviewed ? '重新提交审核意见' : '提交审核意见'}
+                  {myReviewed ? '重新提交审核意见' : '提交审核意见'}
                 </Button>
                 <Button block icon={<ArrowLeftOutlined />} onClick={() => navigate('/review')}>
                   返回审核列表

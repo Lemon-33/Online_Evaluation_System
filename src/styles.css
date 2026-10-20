@@ -104,7 +104,8 @@ html, body, #root {
 }
 
 .login-card {
-  width: 420px;
+  /* 窄屏（手机）不撑出横向滚条：420px 定宽改为「最多 420px，否则占满视口」 */
+  width: min(420px, 92vw);
   padding: 28px;
   background: #fff;
   border-radius: 12px;

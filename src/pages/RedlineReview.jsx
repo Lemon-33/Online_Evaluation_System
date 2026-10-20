@@ -30,8 +30,9 @@ import {
 } from '../lib/constants';
 import { listDisciplines } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
+import { useIsMobile } from '../lib/useIsMobile';
 
-// 年度红线扣分审核（支部书记 admin_type=2 / 分管领导 admin_type=0）
+// 年度红线扣分审核（党总支书记 admin_type=2 / 支部书记 admin_type=0）
 // ------------------------------------------------------------
 // 样式 / 交互完全仿照组织委员的「基础积分评价」页：
 //   顶部身份 banner + 三张统计卡片 + 筛选区 + 列表 + 「评分 / 查看」按钮
@@ -40,11 +41,13 @@ import { useAuth } from '../context/AuthContext';
 //   - 分数是扣分（≤ 0），列表里展示成「扣 X 分」
 //   - 记录由后端生成：登录 / 启动 / 每 6 小时定时 / 打开本页时惰性补齐
 // 可见范围（后端强制）：
-//   - 支部书记 → 全部支部（可跨支部审核）
-//   - 分管领导 → 仅自己支部
+//   - 党总支书记 → 全部支部（可跨支部审核）
+//   - 支部书记 → 仅自己支部
 export default function RedlineReview() {
   const { user } = useAuth();
   const nav = useNavigate();
+  // 窄屏：表格横向滚动（列宽是定值，不加会把整个页面撑出横向滚条）
+  const isMobile = useIsMobile();
   const isSecretary = user?.adminType === ADMIN_TYPE_SECRETARY;
   const [year, setYear] = useState(new Date().getFullYear());
   const [status, setStatus] = useState(''); // '' = 全部
@@ -176,28 +179,19 @@ export default function RedlineReview() {
         message={
           <Space>
             <span style={{ fontWeight: 600 }}>年度红线扣分审核</span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
-            {/* 支部书记：可跨支部审核（全部支部）；分管领导：只看自己支部 */}
+            {/* 党总支书记：可跨支部审核（全部支部）；支部书记：只看自己支部 */}
             <Tag color="gold">
               审核范围：{isSecretary ? '全部支部' : findBranchLabel(user?.branch)}
             </Tag>
           </Space>
-        }
-        description={
-          isSecretary
-            ? '对全部支部党员的年度红线事项逐项核定：存在的事项选「有」并填写具体事由，系统按题面分值累计扣分；不存在选「无」，不扣分。'
-            : '对本支部党员的年度红线事项逐项核定：存在的事项选「有」并填写具体事由，系统按题面分值累计扣分；不存在选「无」，不扣分。'
         }
         style={{ marginBottom: 16 }}
       />
 
       {/* 统计卡片：跟随上方年度筛选 */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -207,12 +201,12 @@ export default function RedlineReview() {
               }
               value={pendingCount}
               suffix="人"
-              valueStyle={{ color: pendingCount > 0 ? '#cf1322' : '#3f8600' }}
+              valueStyle={{ fontSize: 20, color: pendingCount > 0 ? '#cf1322' : '#3f8600' }}
             />
           </Card>
         </Col>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -222,12 +216,12 @@ export default function RedlineReview() {
               }
               value={reviewedCount}
               suffix="人"
-              valueStyle={{ color: '#3f8600' }}
+              valueStyle={{ fontSize: 20, color: '#3f8600' }}
             />
           </Card>
         </Col>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -237,7 +231,7 @@ export default function RedlineReview() {
               }
               value={list.length}
               suffix="条"
-              valueStyle={{ color: '#b71c1c' }}
+              valueStyle={{ fontSize: 20, color: '#b71c1c' }}
             />
           </Card>
         </Col>
@@ -276,6 +270,7 @@ export default function RedlineReview() {
         loading={loading}
         columns={columns}
         dataSource={list}
+        scroll={isMobile ? { x: 'max-content' } : undefined}
         pagination={{ pageSize: 10 }}
         locale={{ emptyText: <Empty description="当前筛选条件下暂无记录" /> }}
       />

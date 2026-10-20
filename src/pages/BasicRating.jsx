@@ -31,6 +31,7 @@ import {
 } from '../lib/constants';
 import { listRatings } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
+import { useIsMobile } from '../lib/useIsMobile';
 
 // 基础积分评价页（组织委员 adminType=1 专属）
 // 筛选模块与「管理员审核」页保持一致：年度 / 月份 / 状态 / 按姓名搜索
@@ -39,6 +40,8 @@ import { useAuth } from '../context/AuthContext';
 export default function BasicRating() {
   const { user } = useAuth();
   const nav = useNavigate();
+  // 窄屏：表格横向滚动（列宽是定值，不加会把整个页面撑出横向滚条）
+  const isMobile = useIsMobile();
   const [year, setYear] = useState(new Date().getFullYear());
   const [month, setMonth] = useState(''); // '' = 全年，1-12 = 指定月份
   const [status, setStatus] = useState(''); // '' = 全部
@@ -49,7 +52,7 @@ export default function BasicRating() {
   const [reviewedCount, setReviewedCount] = useState(0);
 
   // 组织委员只负责本支部
-  // 支部书记（adminType=2）的 branch 为空 → 查全支部
+  // 党总支书记（adminType=2）的 branch 为空 → 查全支部
   const scopeBranch = user?.branch;
   const isSuperAdmin = user?.role === ROLES.ADMIN && user?.adminType === 2;
 
@@ -157,7 +160,7 @@ export default function BasicRating() {
 
   return (
     <div>
-      {/* 顶部 banner：标明身份与数据范围（组织委员 / 支部书记） */}
+      {/* 顶部 banner：标明身份与数据范围（组织委员 / 党总支书记） */}
       <Alert
         type={isSuperAdmin ? 'error' : 'warning'}
         showIcon
@@ -165,12 +168,8 @@ export default function BasicRating() {
         message={
           <Space>
             <span style={{ fontWeight: 600 }}>
-              {isSuperAdmin ? '支部书记评分模式' : '组织委员基础积分评分'}
+              {isSuperAdmin ? '党总支书记评分模式' : '组织委员基础积分评分'}
             </span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
             <Tag color={isSuperAdmin ? 'magenta' : 'gold'}>
               {isSuperAdmin
                 ? '可见全支部'
@@ -178,20 +177,13 @@ export default function BasicRating() {
             </Tag>
           </Space>
         }
-        description={
-          isSuperAdmin
-            ? '您作为支部书记可查看所有支部的基础积分记录；编辑评分请走对应的扣分问卷页。'
-            : `您负责给「${findBranchLabel(
-                scopeBranch
-              )}」的党员进行基础积分评分。`
-        }
         style={{ marginBottom: 16 }}
       />
 
       {/* 统计卡片：跟随上方筛选范围（全年 / 指定月份） */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -201,12 +193,12 @@ export default function BasicRating() {
               }
               value={pendingCount}
               suffix="人"
-              valueStyle={{ color: pendingCount > 0 ? '#cf1322' : '#3f8600' }}
+              valueStyle={{ fontSize: 20, color: pendingCount > 0 ? '#cf1322' : '#3f8600' }}
             />
           </Card>
         </Col>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -216,12 +208,12 @@ export default function BasicRating() {
               }
               value={reviewedCount}
               suffix="人"
-              valueStyle={{ color: '#3f8600' }}
+              valueStyle={{ fontSize: 20, color: '#3f8600' }}
             />
           </Card>
         </Col>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -231,7 +223,7 @@ export default function BasicRating() {
               }
               value={list.length}
               suffix="条"
-              valueStyle={{ color: '#b71c1c' }}
+              valueStyle={{ fontSize: 20, color: '#b71c1c' }}
             />
           </Card>
         </Col>
@@ -283,6 +275,7 @@ export default function BasicRating() {
         loading={loading}
         columns={columns}
         dataSource={list}
+        scroll={isMobile ? { x: 'max-content' } : undefined}
         locale={{ emptyText: <Empty description="当前筛选条件下暂无记录" /> }}
         pagination={{ pageSize: 10 }}
       />

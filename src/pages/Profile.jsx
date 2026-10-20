@@ -147,7 +147,7 @@ function SidebarOrderCard() {
 export default function Profile() {
   const { user } = useAuth();
   const isAdmin = user?.role === ROLES.ADMIN;
-  // adminType 0=分管领导, 1=组织委员（普通党员 admin=0, adminType 任意）
+  // adminType 0=支部书记, 1=组织委员（普通党员 admin=0, adminType 任意）
   const adminTypeText = isAdmin
     ? (ADMIN_TYPE_META[user?.adminType]?.text || '管理员')
     : null;

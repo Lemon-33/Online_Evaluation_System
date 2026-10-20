@@ -33,9 +33,12 @@ import {
 } from '../lib/constants';
 import { listEvaluations, getUnsubmittedCount } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
+import { useIsMobile } from '../lib/useIsMobile';
 
 export default function Review() {
   const { user } = useAuth();
+  // 窄屏：表格横向滚动（列宽是定值，不加会把整个页面撑出横向滚条）
+  const isMobile = useIsMobile();
   const [year, setYear] = useState(new Date().getFullYear());
   // 进入页面默认选中「当前月份」（避免管理员打开看到空的全年列表）
   const [month, setMonth] = useState(new Date().getMonth() + 1); // '' = 全年，1-12 = 指定月份
@@ -45,8 +48,8 @@ export default function Review() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate(); // 「审核」→ 整页审核表单 /review-form/:id
 
-  // 所有审核人（含支部书记）的范围一律由 review_assignment 决定：
-  // 支部书记不再「看全体」，刚注册时审核对象为空，需系统管理员在「审核关系维护」里指派
+  // 所有审核人（含党总支书记）的范围一律由 review_assignment 决定：
+  // 党总支书记不再「看全体」，刚注册时审核对象为空，需系统管理员在「审核关系维护」里指派
   const scopeBranch = user?.branch;
 
   // 范围内的待审 / 已审核 / 未提交自评人数（不受 status 切换影响）
@@ -62,9 +65,9 @@ export default function Review() {
       // 「未提交人数」只在选定了具体月份时才有意义；全年视图下不查、不显示
       const needUnsubmitted = !!month;
       const tasks = [
-        listEvaluations({ year, month, status, keyword, branch: scopeBranch }),
-        listEvaluations({ year, month, status: 'pending', branch: scopeBranch }),
-        listEvaluations({ year, month, status: 'reviewed', branch: scopeBranch }),
+        listEvaluations({ year, month, status, keyword, branch: scopeBranch, scope: 'assignments' }),
+        listEvaluations({ year, month, status: 'pending', branch: scopeBranch, scope: 'assignments' }),
+        listEvaluations({ year, month, status: 'reviewed', branch: scopeBranch, scope: 'assignments' }),
       ];
       if (needUnsubmitted)
         tasks.push(getUnsubmittedCount({ year, month, branch: scopeBranch }));
@@ -151,12 +154,28 @@ export default function Review() {
       align: 'center',
     },
     {
+      // 状态一律看「我的审核状态」（后端按 reviewers 列派生）：
+      //   一个被审核人可以有多个审核人，记录级 reviewStatus 只表示「这条卷子有没有被审过」，
+      //   甲审完会把乙的也标成 reviewed；只有 myReviewStatus 能表达「**我**审过没有」。
       title: '状态',
-      dataIndex: 'reviewStatus',
+      dataIndex: 'myReviewStatus',
       width: 100,
       align: 'center',
-      render: (s) =>
-        s === 'reviewed' ? <Tag color="green">已审核</Tag> : <Tag color="orange">待审核</Tag>,
+      render: (s, rec) => (
+        <div>
+          {(s || rec.reviewStatus) === 'reviewed' ? (
+            <Tag color="green">已审核</Tag>
+          ) : (
+            <Tag color="orange">待审核</Tag>
+          )}
+          {/* 我审过、但之后被别的审核人覆盖了（当前生效的不是我的那版） */}
+          {rec.overriddenByOther && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+              已被他人更新
+            </div>
+          )}
+        </div>
+      ),
     },
     {
       title: '操作',
@@ -164,7 +183,7 @@ export default function Review() {
       align: 'center',
       render: (_, rec) => (
         <Button type="link" onClick={() => openReview(rec)}>
-          {rec.reviewStatus === 'reviewed' ? '重新审核' : '审核'}
+          {(rec.myReviewStatus || rec.reviewStatus) === 'reviewed' ? '重新审核' : '审核'}
         </Button>
       ),
     },
@@ -172,33 +191,25 @@ export default function Review() {
 
   return (
     <div>
-      {/* 审核模式 banner */}
+      {/* 抬头 banner：与「年度红线扣分审核」/「年度专项加分审核」同一套写法
+          （标题 + 人名 + 操作说明），但不带「审核范围」小框 ——
+          本页范围由「审核关系维护」逐人指派决定，不是一个支部能概括的 */}
       <Alert
         type="warning"
         showIcon
         icon={<AuditOutlined />}
         message={
           <Space>
-            <span style={{ fontWeight: 600 }}>管理员审核模式</span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
-            <Tag color="gold">{`负责审核：${findBranchLabel(scopeBranch)}`}</Tag>
+            <span style={{ fontWeight: 600 }}>履职贡献评价审核</span>
           </Space>
-        }
-        description={
-          user?.hasReviewTargets
-            ? ''
-            : '当前尚未给您指派任何审核对象，请联系系统管理员'
         }
         style={{ marginBottom: 16 }}
       />
 
       {/* 统计卡片：标题跟随所选年月范围 */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -208,12 +219,12 @@ export default function Review() {
               }
               value={pendingCount}
               suffix="人"
-              valueStyle={{ color: pendingCount > 0 ? '#cf1322' : '#3f8600' }}
+              valueStyle={{ fontSize: 20, color: pendingCount > 0 ? '#cf1322' : '#3f8600' }}
             />
           </Card>
         </Col>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -223,12 +234,12 @@ export default function Review() {
               }
               value={reviewedCount}
               suffix="人"
-              valueStyle={{ color: '#3f8600' }}
+              valueStyle={{ fontSize: 20, color: '#3f8600' }}
             />
           </Card>
         </Col>
-        <Col span={8}>
-          <Card>
+        <Col span={8} xs={24} sm={12} md={8}>
+          <Card size="small">
             <Statistic
               title={
                 <Space>
@@ -240,6 +251,7 @@ export default function Review() {
               value={month ? unsubmittedCount : '—'}
               suffix={month ? '人' : ''}
               valueStyle={{
+                fontSize: 20,
                 color: month
                   ? unsubmittedCount > 0
                     ? '#fa541c'
@@ -320,6 +332,7 @@ export default function Review() {
         loading={loading}
         columns={columns}
         dataSource={list}
+        scroll={isMobile ? { x: 'max-content' } : undefined}
         locale={{ emptyText: <Empty description="暂无数据" /> }}
         pagination={{ pageSize: 10 }}
       />

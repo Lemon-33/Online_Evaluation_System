@@ -47,7 +47,7 @@ import { useAuth } from '../context/AuthContext';
 
 const { Text } = Typography;
 
-// 年度红线扣分问卷页（分管领导）
+// 年度红线扣分问卷页（支部书记）
 // ------------------------------------------------------------
 // 与「基础积分评价」的扣分问卷页同构：左问卷 / 右得分卡。
 // 题型差异：这里是「有无」选择题 + 具体事由，而不是填空题数量。
@@ -244,7 +244,8 @@ export default function RedlineRating() {
 
       <Row gutter={16}>
         {/* 左侧：问卷 */}
-        <Col span={16}>
+        {/* 窄屏（<768px）左栏整行，右栏（扣分合计卡）掉到下面 */}
+        <Col span={16} xs={24} md={16}>
           <Card title="红线事项核定" style={{ marginBottom: 16 }}>
             {REDLINE_ITEMS.map((it, idx) => {
               const v = answers[it.key] || { value: REDLINE_NO, reason: '' };
@@ -303,7 +304,7 @@ export default function RedlineRating() {
         </Col>
 
         {/* 右侧：得分卡 */}
-        <Col span={8}>
+        <Col span={8} xs={24} md={8}>
           <Card
             title={
               <Space>
@@ -345,7 +346,7 @@ export default function RedlineRating() {
                 </Text>
               ) : (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  审核人：{user?.name || '分管领导'}
+                  审核人：{user?.name || '支部书记'}
                 </Text>
               )}
             </Space>
@@ -360,7 +361,7 @@ export default function RedlineRating() {
           showIcon
           icon={<CheckCircleOutlined />}
           style={{ marginTop: 16 }}
-          message={`该记录已由 ${record.reviewerName || '分管领导'} 于 ${record.reviewedAt || '-'} 审核，重新提交将覆盖原结果。`}
+          message={`该记录已由 ${record.reviewerName || '支部书记'} 于 ${record.reviewedAt || '-'} 审核，重新提交将覆盖原结果。`}
         />
       )}
     </div>

@@ -13,11 +13,17 @@ import {
   ADMIN_TYPE_ORGANIZER,
   ADMIN_TYPE_SECRETARY,
   ADMIN_TYPE_EMPLOYEE,
+  ADMIN_TYPE_DIRECTOR,
 } from './admin-whitelist.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
 const DB_PATH = path.join(__dirname, 'party.db');
+
+// 履职贡献自评的开放起点：2026 年 10 月。
+//   早于它的月份（2026-09 及以前）已封档 → POST /api/evaluations 直接拒绝。
+//   与前端 src/lib/constants.js 的 EVAL_OPEN_FROM 保持一致（两边改的时候一起改）
+const EVAL_OPEN_FROM = { year: 2026, month: 10 };
 
 // ============================================================
 // 读取 server/.env（若存在）—— 只为「后门口令」这类密钥省去改 PM2/systemd 的麻烦
@@ -161,7 +167,7 @@ app.use(express.json({ limit: '2mb' }));
 //      「它凭什么是公开的」，把遗忘风险反转成主动声明
 //   ③ 身份一律从 token 解出（req.user），不信任请求体里的 name / work_id，
 //      防止登录用户冒名提交 / 越权查询
-//   ④ 角色分级在每个业务接口内做（分管领导限本支部 / 支部书记全支部等）
+//   ④ 角色分级在每个业务接口内做（支部书记限本支部 / 党总支书记全支部等）
 // ============================================================
 const SESSION_TTL_DAYS = 7; // 会话有效期（天）
 
@@ -298,14 +304,15 @@ app.use('/api', (req, res, next) => {
 const deny = (res, msg) => res.status(403).json({ code: 'FORBIDDEN', message: msg || '无权操作' });
 
 // 角色判定：req.user 来自 session 联表，身份完全由 admin_type 决定（不再有 admin 列）
-//   0 = 分管领导   1 = 组织委员   2 = 支部书记   3 = 普通党员
-const isLeader    = (u) => !!u && u.admin_type === ADMIN_TYPE_LEADER;    // 分管领导
+//   0 = 支部书记   1 = 组织委员   2 = 党总支书记   3 = 普通党员   4 = 分管领导
+const isLeader    = (u) => !!u && u.admin_type === ADMIN_TYPE_LEADER;    // 支部书记
 const isOrganizer = (u) => !!u && u.admin_type === ADMIN_TYPE_ORGANIZER; // 组织委员
-const isSecretary = (u) => !!u && u.admin_type === ADMIN_TYPE_SECRETARY; // 支部书记
+const isSecretary = (u) => !!u && u.admin_type === ADMIN_TYPE_SECRETARY; // 党总支书记
 const isEmployee  = (u) => !!u && u.admin_type === ADMIN_TYPE_EMPLOYEE;  // 普通党员
+const isDirector  = (u) => !!u && u.admin_type === ADMIN_TYPE_DIRECTOR;  // 分管领导
 
 // 可提交「履职贡献自评」的 admin_type：普通党员(3) + 组织委员(1)
-// （分管领导只审核不自评；支部书记只审核，均不自评）
+// （支部书记 / 分管领导只审核不自评；党总支书记只审核，均不自评）
 const SELF_EVAL_TYPES = [ADMIN_TYPE_ORGANIZER, ADMIN_TYPE_EMPLOYEE];
 const canSelfEval = (u) => !!u && SELF_EVAL_TYPES.includes(u.admin_type);
 
@@ -325,25 +332,131 @@ const reviewTargetsOf = (workId) =>
         .map((r) => r.target_work_id)
     : [];
 
+// 「期」= year*12 + month —— 把年月折成一个整数，方便比较先后
+const periodOf = (year, month) => Number(year || 0) * 12 + (Number(month) || 1);
+
+// 审核关系的**生效起始期** = 这条 review_assignment 建立的年月（取自 created_at）
+//   业务口径：审核关系**只对建立当月及未来生效**。
+//   今天给某人新加一条审核关系，被审核人**历史月份**的自评不该突然出现在他的审核界面里。
+//   created_at 形如 '2026-10-19 15:04:05'（列定义 datetime('now','localtime')）
+const assignmentFromPeriod = (createdAt) => {
+  const m = /^(\d{4})-(\d{1,2})/.exec(String(createdAt || ''));
+  return m ? periodOf(m[1], m[2]) : 0; // 取不到（异常 / 空）→ 0 = 不设限
+};
+
+// 我名下每条审核关系的生效起始期 → Map<target_work_id(小写), fromPeriod>
+const reviewTargetFromPeriodsOf = (workId) => {
+  const map = new Map();
+  if (!workId) return map;
+  for (const r of db
+    .prepare(
+      'SELECT target_work_id, created_at FROM review_assignment WHERE reviewer_work_id COLLATE NOCASE = ?'
+    )
+    .all(String(workId))) {
+    if (!r.target_work_id) continue;
+    map.set(String(r.target_work_id).toLowerCase(), assignmentFromPeriod(r.created_at));
+  }
+  return map;
+};
+
+// 这条记录是不是**我本人**审过的：`evaluation.reviewers` 里有我的工号。
+//   与 `review_assignment.created_at` 是两回事 —— 前者是「这条卷子谁审过」，
+//   后者是「我什么时候成为他的审核人」。
+const reviewedByMe = (me, rec) => {
+  const mine = String(me?.work_id || '').toLowerCase();
+  if (!mine) return false;
+  return parseJsonArray(rec?.reviewers).some(
+    (x) => String(x?.workId || '').toLowerCase() === mine
+  );
+};
+
+// 单条记录的判定：该记录是否落在「审核关系生效之后」
+//   历史月份（早于关系建立月份）对该审核人**不可见 / 不可审**
+const withinAssignmentPeriod = (me, rec) => {
+  if (!rec?.work_id) return false;
+  const row = db
+    .prepare(
+      'SELECT created_at FROM review_assignment WHERE reviewer_work_id COLLATE NOCASE = ? AND target_work_id COLLATE NOCASE = ?'
+    )
+    .get(String(me?.work_id || ''), String(rec.work_id));
+  if (periodOf(rec.year, rec.month) >= assignmentFromPeriod(row?.created_at)) return true;
+  // 例外：**我本人审过**的历史记录始终可见 / 可审 ——
+  //   管理员误删审核关系再补回来时（新行 created_at = 当时），不该丢掉我已审过的记录
+  return reviewedByMe(me, rec);
+};
+
 // 查看单条 evaluation：本人记录 / 我在 review_assignment 里被指派的审核对象
-//   注：支部书记**不再**有「全体可见」的特判 —— 它的审核范围与所有人一样，
+//   注：党总支书记**不再**有「全体可见」的特判 —— 它的审核范围与所有人一样，
 //   完全由 review_assignment 决定。刚注册时该表为空（ scopes 为空），
 //   需要由系统管理员在「审核关系维护」里指派后才看得到。
 const canViewEvaluation = (me, rec) => {
   if (!me || !rec) return false;
   if (canSelfEval(me) && me.work_id && rec.work_id === me.work_id) return true;
-  return rec.work_id ? reviewTargetsOf(me.work_id).includes(rec.work_id) : false;
+  if (!rec.work_id) return false;
+  if (!reviewTargetsOf(me.work_id).includes(rec.work_id)) return false;
+  // 审核关系只对建立当月及未来生效：建立之前的历史月份即使拿到 id 也看不到
+  return withinAssignmentPeriod(me, rec);
 };
 
 // 审核 / 删除单条 evaluation：仅限我的审核对象（本人不能审自己）
 const canReviewEvaluation = (me, rec) => {
   if (!me || !rec) return false;
-  return rec.work_id ? reviewTargetsOf(me.work_id).includes(rec.work_id) : false;
+  if (!rec.work_id) return false;
+  if (!reviewTargetsOf(me.work_id).includes(rec.work_id)) return false;
+  return withinAssignmentPeriod(me, rec);
+};
+
+// 「我的审核状态」—— 派生字段，不落库
+// ---------------------------------------------------------------------------
+// 为什么需要它：一个被审核人可以配**多个**审核人，而 evaluation 一人一月只有一行、
+//   只有一个**记录级**的 reviewStatus。甲审完 → reviewStatus='reviewed' →
+//   这条记录就从乙的「待审核」列表里消失了，乙根本不知道自己还没审。
+//
+// 所以审核人视图一律改用 myReviewStatus（由 reviewers 列派生）：
+//   'reviewed' = reviewers 里有我的工号（我审过）
+//   'pending'  = 没有（我没审过，不管别人审没审）
+//
+// 记录级 reviewStatus **语义保持不变**，继续服务员工端「自评已锁定」和积分汇总取审核分。
+// 不是我的审核对象时（例如员工查自己的自评）返回 null —— 对员工这个字段没有意义。
+// 是否「历史月份」：早于当前年月
+const isPastMonth = (year, month) => {
+  const y = Number(year) || 0;
+  const m = Number(month) || 1;
+  const d = new Date();
+  const cy = d.getFullYear();
+  const cm = d.getMonth() + 1;
+  return y < cy || (y === cy && m < cm);
+};
+
+const myReviewStatusOf = (me, rec, myTargets) => {
+  if (!me?.work_id || !rec?.work_id) return null;
+  if (!myTargets || !myTargets.has(String(rec.work_id).toLowerCase())) return null;
+  const list = parseJsonArray(rec.reviewers);
+  // 历史月份 + 没有 reviewers（加列之前就已审完的）：**不重新开启**，
+  //   沿用记录级 reviewStatus —— 审核关系与本次改动只对**当月和未来**生效，历史月份保持原样
+  if (!list.length && isPastMonth(rec.year, rec.month))
+    return rec.reviewStatus === 'reviewed' ? 'reviewed' : 'pending';
+  // 当月及未来：reviewers 为空 = 还没人审过（或老数据）→ 一律「待审核」，
+  //   让每位审核人都过一遍。反正现行模式就是后提交者覆盖，重审不会产生脏数据。
+  if (!list.length) return 'pending';
+  const mine = String(me.work_id).toLowerCase();
+  return list.some((x) => String(x?.workId || '').toLowerCase() === mine)
+    ? 'reviewed'
+    : 'pending';
+};
+
+// 我审过，但当前生效的不是我的那版（之后被别的审核人覆盖）
+const overriddenByOther = (me, rec) => {
+  const list = parseJsonArray(rec?.reviewers);
+  if (!list.length || !me?.work_id) return false;
+  const mine = String(me.work_id).toLowerCase();
+  const idx = list.findIndex((x) => String(x?.workId || '').toLowerCase() === mine);
+  return idx >= 0 && idx !== list.length - 1;
 };
 
 // 登录 / 注册返回给前端的用户信息补充：各类入口开关
 //   hasReviewTargets：是否有「履职积分审核」入口 —— 一律看 review_assignment 里有没有指派，
-//     不再按身份特判。支部书记刚注册时同样为 false，需由系统管理员指派后才为 true
+//     不再按身份特判。党总支书记刚注册时同样为 false，需由系统管理员指派后才为 true
 //   canUserAdmin / canReviewAssign / canFormOverride：三个系统维护工具的入口开关
 //     默认全员 false；授权存在 permission 表（/backdoor →「权限管理」页维护）
 //     前端侧边栏菜单项与路由守卫读这些标记，后端对应接口用同一套判定（canUseTool）
@@ -369,7 +482,7 @@ db.exec(`
     pw TEXT NOT NULL,
     name TEXT NOT NULL,
     work_id TEXT NOT NULL,
-    -- admin_type: 0=分管领导, 1=组织委员, 2=支部书记, 3=普通党员（默认）
+    -- admin_type: 0=支部书记, 1=组织委员, 2=党总支书记, 3=普通党员（默认）, 4=分管领导
     admin_type INTEGER DEFAULT 3,
     type TEXT,
     job TEXT,
@@ -471,10 +584,10 @@ db.exec(`
     expires_at TEXT NOT NULL
   );
   -- 履职贡献「审核关系」表：谁（reviewer_work_id）负责审谁（target_work_id）
-  --   - 所有审核人（含支部书记）都在此登记各自的被审对象（支持后期直接改库维护）
-  --   - 支部书记不再由 admin_type=2 特判成「全体」：其范围同样来自本表，
+  --   - 所有审核人（含党总支书记）都在此登记各自的被审对象（支持后期直接改库维护）
+  --   - 党总支书记不再由 admin_type=2 特判成「全体」：其范围同样来自本表，
   --     刚注册时为空，需由系统管理员在「审核关系维护」里指派后才生效
-  --   - 基础积分那条线不用此表（由组织委员/支部书记按角色判定）
+  --   - 基础积分那条线不用此表（由组织委员/党总支书记按角色判定）
   CREATE TABLE IF NOT EXISTS review_assignment (
     reviewer_work_id TEXT NOT NULL,
     target_work_id   TEXT NOT NULL,
@@ -535,6 +648,17 @@ try {
 //   reviewScores = 审核人定稿的答案（含履职扣分部分；重审时覆盖）
 try {
   db.exec('ALTER TABLE evaluation ADD COLUMN reviewScores TEXT');
+} catch (_) {
+  // 列已存在，忽略
+}
+// evaluation 补加 reviewers 列：**累积**提交过审核的审核人名单（JSON 数组）
+//   [{ workId, name, at }]，按 work_id 去重 —— 同一个审核人重复审只留最后一次时间。
+//   注意它**不改**「互相覆盖」的现行模式：分数 / 意见 / 定稿答案仍然只有一个槽位
+//   （reviewerName / reviewScore / reviewComment / reviewScores 仍被后提交者覆盖），
+//   本列只是让员工端能看出「我被 1 位还是 2 位审核人审过」。
+//   老数据该列为 NULL → 前端回落到单条 reviewerName 显示，不会白屏。
+try {
+  db.exec('ALTER TABLE evaluation ADD COLUMN reviewers TEXT');
 } catch (_) {
   // 列已存在，忽略
 }
@@ -656,9 +780,13 @@ app.get('/api/gateway', (_req, res) => {
 const normWorkId = (v) => String(v ?? '').trim().toUpperCase();
 
 app.post('/api/register', (req, res) => {
-  const { user_id, pw, name, work_id, type, job, branch } = req.body || {};
-  if (!user_id || !pw || !name || !work_id || !branch)
-    return res.json({ code: 'BAD_INPUT', message: '缺少必填字段（user_id/pw/name/work_id/branch）' });
+  // 注册页已取消「所在党支部」这一栏：支部不再由本人选择，
+  //   一律取 `server/admin-whitelist.mjs` 里该工号登记的 branch（源=党员信息表），
+  //   避免党员本人选错支部导致评价 / 汇总口径错乱。
+  //   body 里即便带了 branch 也**直接忽略**（后端权威来源是白名单）。
+  const { user_id, pw, name, work_id, type, job } = req.body || {};
+  if (!user_id || !pw || !name || !work_id)
+    return res.json({ code: 'BAD_INPUT', message: '缺少必填字段（user_id/pw/name/work_id）' });
   // 与 /api/recover/reset、/api/backdoor/users 一致的口令长度（防 1 位弱口令 / 哈希爆破）
   if (pw.length < 6 || pw.length > 30)
     return res.json({ code: 'BAD_INPUT', message: '密码长度需为 6-30 位' });
@@ -671,10 +799,15 @@ app.post('/api/register', (req, res) => {
     return res.json({ code: 'WORK_ID_NOT_IN_LIST', message: '工作证编号异常，请重新输入' });
   }
   const adminType = wl.adminType;
+  // 所在党支部：白名单（党员信息表）登记值；缺失说明花名册没登记全 → 直接拒绝注册，
+  //   宁可报错也不让用户自己选
+  if (!wl.branch)
+    return res.json({ code: 'BRANCH_NOT_IN_LIST', message: '该工作证编号未在白名单登记所在党支部，请联系系统管理员' });
+  const branch = wl.branch;
 
   // 岗位类型必填规则：
   //   组织委员(1) / 普通党员(3) → 必填
-  //   分管领导(0) / 支部书记(2) → 可留空，默认「没有」
+  //   支部书记(0) / 党总支书记(2) / 分管领导(4) → 可留空，默认「没有」
   const needPosition =
     adminType === ADMIN_TYPE_ORGANIZER || adminType === ADMIN_TYPE_EMPLOYEE;
   if (needPosition && (!type || !job))
@@ -953,7 +1086,7 @@ app.get('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
 //     **不再要求该工号已注册** —— 允许先把关系建上（人还没注册 / 工号先录进来），
 //     对方注册后关系自动生效。列表里未注册的工号只显示工号、不显示姓名。
 //   - 校验：审核人不能是「被评对象」(admin_type IN BASIC_RATING_TYPES)
-//           因为这些人需要走「组织委员/支部书记」的评价，不参与审核关系
+//           因为这些人需要走「组织委员/党总支书记」的评价，不参与审核关系
 //   - 已存在的关系（PK 冲突）走 IGNORE，不报错
 //   - 返回 { code, added, alreadyExists, invalidWorkIds }
 app.post('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
@@ -1037,28 +1170,52 @@ app.delete('/api/backdoor/assignments', requireReviewAssign, (req, res) => {
   res.json({ code: 'OK', data: { deleted } });
 });
 
-// 后门：员工信息 upsert（无白名单限制）
-//   body: { user_id, pw?, name, work_id, admin_type, type?, job?, branch }
-//   - 若 work_id 已在 user_table → UPDATE（pw 留空/缺失 = 不改密码）
-//   - 若 work_id 不存在       → INSERT（pw 必填；user_id 不可与现有冲突）
-//   - 不走白名单 / 不检查 positionType 是否必填
-//   - admin_type 允许 0/1/2/3；**9 只有系统管理员本人能设**
-//     否则「员工信息维护」这个工具就等价于系统管理员：被授权人新建一个 admin_type=9 的
-//     账号再登录，即可通过 requireSystemAdmin 调用「权限管理」，实现越权自我扩散
-//   - 改了密码 / 换了登录账号 → 立即作废该人全部会话（旧 token 原本能一直用到 7 天 TTL 到期）
+// 后门：员工信息修改（**仅修改**，不再支持新建）
+// ------------------------------------------------------------
+// 设计变更（2026-10-19）：
+//   · 取消「新建账号」功能 —— 一律通过修改现有记录来调整；
+//     想要新账号需要先在注册白名单里登记好，再在「员工信息维护」里搜索该工号 → 修改。
+//   · 系统管理员在表单里**可以改工号**（改名）：work_id 是员工的主键，这里
+//     改成"原工号定位行 + 新工号落库"的 UPDATE 模式；新工号不能撞别人。
+//   · 其它被授权账号不能改工号（最容易出问题：把别人的工号改成不存在的号，
+//     再说"账号消失"），仅系统管理员能改。
+//
+//   body: {
+//     originalWorkId,            // 必填：被修改员工的"原工号"，用于定位行
+//     user_id, name, work_id,    // work_id 是新工号
+//     pw?, admin_type, type?, job?, branch,
+//   }
+//   - admin_type 允许 0/1/2/3/4；**9 只有系统管理员本人能设**
+//     （防止「员工信息维护」等价于系统管理员：被授权人新建一个 admin_type=9 的
+//      账号再登录，即可通过 requireSystemAdmin 调用「权限管理」实现越权自我扩散）
+//   - 改了密码 / 换了登录账号 → 立即作废该人全部会话
+//     （旧 token 原本能一直用到 7 天 TTL 到期）
 app.post('/api/backdoor/users', requireUserAdmin, (req, res) => {
-  const { user_id, pw, name, work_id, admin_type, type, job, branch } = req.body || {};
-  // 基础校验
-  if (!user_id || !name || !work_id || !branch)
-    return res.json({ code: 'BAD_INPUT', message: '登录账号 / 姓名 / 工号 / 所在支部 不可为空' });
+  const {
+    originalWorkId,
+    user_id, pw, name, work_id,
+    admin_type, type, job, branch,
+  } = req.body || {};
+
+  // 必填：登录账号 / 姓名 / 新工号
+  if (!user_id || !name || !work_id)
+    return res.json({ code: 'BAD_INPUT', message: '登录账号 / 姓名 / 工号 不可为空' });
+  // 必填：原工号（前端必须先在「查询 / 加载用户」区加载要修改的人）
+  if (!originalWorkId)
+    return res.json({
+      code: 'BAD_INPUT',
+      message: '请先在「查询 / 加载用户」区加载要修改的用户，再保存',
+    });
+
   const at = Number(admin_type);
-  if (![ADMIN_TYPE_LEADER, ADMIN_TYPE_ORGANIZER, ADMIN_TYPE_SECRETARY, ADMIN_TYPE_EMPLOYEE, ADMIN_TYPE_SYSTEM].includes(at))
-    return res.json({ code: 'BAD_INPUT', message: '身份必须是 0=分管领导 / 1=组织委员 / 2=支部书记 / 3=普通党员 / 9=系统管理员' });
+  if (![ADMIN_TYPE_LEADER, ADMIN_TYPE_ORGANIZER, ADMIN_TYPE_SECRETARY, ADMIN_TYPE_EMPLOYEE, ADMIN_TYPE_DIRECTOR, ADMIN_TYPE_SYSTEM].includes(at))
+    return res.json({ code: 'BAD_INPUT', message: '身份必须是 0=支部书记 / 1=组织委员 / 2=党总支书记 / 3=普通党员 / 4=分管领导 / 9=系统管理员' });
 
   // 提权闸门：只有系统管理员本人可以授予 / 修改「系统管理员」身份
   if (at === ADMIN_TYPE_SYSTEM && req.user?.admin_type !== ADMIN_TYPE_SYSTEM)
     return deny(res, '只有系统管理员可以设置「系统管理员」身份');
 
+  const origWid = normWorkId(originalWorkId);
   const wid = normWorkId(work_id);
   const trimmedUserId = String(user_id).trim();
 
@@ -1071,78 +1228,69 @@ app.post('/api/backdoor/users', requireUserAdmin, (req, res) => {
   if (isBackdoorWorkId(wid) && req.user?.admin_type !== ADMIN_TYPE_SYSTEM)
     return deny(res, '系统管理员账号只能由系统管理员本人维护');
 
+  // 按原工号定位行（必存在 —— 不存在说明前端没加载过）
   const existing = db
-    .prepare('SELECT user_id, admin_type FROM user_table WHERE work_id COLLATE NOCASE = ?')
-    .get(wid);
-
-  // 「修改身份」门禁：只有**系统管理员**或**支部书记**可以**改动**已有账号的 admin_type。
-  //   UPDATE 时若新值与当前值相同不算"改"，其它字段仍允许 userAdmin 授权人维护。
-  //   9 仍由上面的"提权闸门"单独挡过（仅系统管理员本人可设）。
-  if (existing && existing.admin_type !== at) {
-    if (
-      req.user?.admin_type !== ADMIN_TYPE_SYSTEM &&
-      req.user?.admin_type !== ADMIN_TYPE_SECRETARY
-    ) {
-      return deny(res, '只有系统管理员或支部书记可以修改身份（admin_type）');
-    }
-  }
-
-  // 「新建用户」闸门：**只有系统管理员本人**能新建 —— 哪怕是支部书记、哪怕被授予了
-  //   「员工信息维护」工具也不行。前端 /user-admin 已经不给新建入口，这里是硬边界。
-  if (!existing && req.user?.admin_type !== ADMIN_TYPE_SYSTEM) {
-    return deny(res, '只有系统管理员可以新建用户');
-  }
-
-  // 新建（**仅新建**，改已有账号不受影响）：工号必须在注册白名单里，
-  //   与 /api/register 同一条准入规则 —— 只看工号在不在名单，**不管名单里登记的
-  //   adminType 是什么**，身份仍用系统管理员在表单里选的 admin_type。
-  //   系统管理员账号（superadmin）不在白名单里，它由后端 seed 维护，这里放行。
-  if (!existing && !isBackdoorWorkId(wid) && !lookupWorkId(wid)) {
+    .prepare('SELECT user_id, admin_type, work_id FROM user_table WHERE work_id COLLATE NOCASE = ?')
+    .get(origWid);
+  if (!existing) {
     return res.json({
-      code: 'WORK_ID_NOT_IN_LIST',
-      message: '工作证编号不在注册白名单中，无法新建该账号',
+      code: 'NOT_FOUND',
+      message: `原工号 ${origWid} 在用户表中找不到，请刷新后重新加载该用户再保存`,
     });
   }
 
-  if (existing) {
-    // UPDATE
-    if (trimmedUserId !== existing.user_id) {
-      const conflict = db
-        .prepare('SELECT 1 FROM user_table WHERE user_id = ? AND work_id COLLATE NOCASE != ?')
-        .get(trimmedUserId, wid);
-      if (conflict)
-        return res.json({ code: 'USER_ID_CONFLICT', message: `登录账号 ${trimmedUserId} 已被其它用户占用` });
-    }
-    const sql = `UPDATE user_table
-                    SET user_id = ?, name = ?, work_id = ?, admin_type = ?, type = ?, job = ?, branch = ?
-                        ${pw ? ', pw = ?' : ''}
-                  WHERE work_id COLLATE NOCASE = ?`;
-    const args = [trimmedUserId, String(name).trim(), wid, at, type || null, job || null, branch];
-    if (pw) args.push(hashPassword(String(pw)));
-    args.push(wid);
-    const revoke = Boolean(pw) || trimmedUserId !== existing.user_id;
-    const tx = db.transaction(() => {
-      db.prepare(sql).run(...args);
-      // 会话按 user_id 挂靠，用改动前的 user_id 删
-      if (revoke) db.prepare('DELETE FROM session WHERE user_id = ?').run(existing.user_id);
-    });
-    tx();
-    return res.json({ code: 'OK', action: 'updated', sessionsRevoked: revoke });
-  } else {
-    // INSERT
-    if (!pw) return res.json({ code: 'PWD_REQUIRED', message: '新建用户必须填写登录密码' });
-    if (db.prepare('SELECT 1 FROM user_table WHERE user_id = ?').get(trimmedUserId))
-      return res.json({ code: 'USER_ID_CONFLICT', message: `登录账号 ${trimmedUserId} 已被占用` });
-    try {
-      db.prepare(
-        `INSERT INTO user_table (user_id, pw, name, work_id, admin_type, type, job, branch)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(trimmedUserId, hashPassword(String(pw)), String(name).trim(), wid, at, type || null, job || null, branch);
-    } catch (e) {
-      return res.json({ code: 'DB_ERROR', message: e.message });
-    }
-    return res.json({ code: 'OK', action: 'inserted' });
+  // 「修改身份」门禁：**只有系统管理员本人**可以改动已有账号的 admin_type。
+  //   · 2026-10-19 起撤销原「党总支书记」例外。
+  //   · 改值才挡；保持不变不算"改"，其它字段仍允许 userAdmin 授权人维护。
+  if (existing.admin_type !== at && req.user?.admin_type !== ADMIN_TYPE_SYSTEM) {
+    return deny(res, '只有系统管理员可以修改身份（admin_type）');
   }
+
+  // 「修改工号」门禁：**只有系统管理员本人**可以改动 work_id。
+  //   · 改值才挡（保持不变不算"改"）。
+  //   · 新工号不能撞别人的记录（自己这条不算）。
+  if (wid !== existing.work_id) {
+    if (req.user?.admin_type !== ADMIN_TYPE_SYSTEM) {
+      return deny(res, '只有系统管理员可以修改工号（work_id）');
+    }
+    const conflict = db
+      .prepare('SELECT 1 FROM user_table WHERE work_id COLLATE NOCASE = ? AND work_id COLLATE NOCASE != ?')
+      .get(wid, origWid);
+    if (conflict) {
+      return res.json({ code: 'WORK_ID_CONFLICT', message: `工号 ${wid} 已被其它用户占用` });
+    }
+  }
+
+  // 「登录账号 user_id」冲突检查
+  if (trimmedUserId !== existing.user_id) {
+    const conflict = db
+      .prepare('SELECT 1 FROM user_table WHERE user_id = ? AND work_id COLLATE NOCASE != ?')
+      .get(trimmedUserId, origWid);
+    if (conflict)
+      return res.json({ code: 'USER_ID_CONFLICT', message: `登录账号 ${trimmedUserId} 已被其它用户占用` });
+  }
+
+  // 所在支部：表单选了就以表单为准；没选则回落到白名单（党员信息表）里登记的支部
+  const finalBranch = branch || lookupWorkId(wid)?.branch || '';
+  if (!finalBranch)
+    return res.json({ code: 'BAD_INPUT', message: '所在支部不可为空：该工号未在白名单登记支部，请手动选择' });
+
+  // ===== UPDATE（统一路径，不再有 INSERT）=====
+  const sql = `UPDATE user_table
+                  SET user_id = ?, name = ?, work_id = ?, admin_type = ?, type = ?, job = ?, branch = ?
+                      ${pw ? ', pw = ?' : ''}
+                WHERE work_id COLLATE NOCASE = ?`;
+  const args = [trimmedUserId, String(name).trim(), wid, at, type || null, job || null, finalBranch];
+  if (pw) args.push(hashPassword(String(pw)));
+  args.push(origWid);
+  const revoke = Boolean(pw) || trimmedUserId !== existing.user_id;
+  const tx = db.transaction(() => {
+    db.prepare(sql).run(...args);
+    // 会话按 user_id 挂靠，用改动前的 user_id 删
+    if (revoke) db.prepare('DELETE FROM session WHERE user_id = ?').run(existing.user_id);
+  });
+  tx();
+  return res.json({ code: 'OK', action: 'updated', sessionsRevoked: revoke });
 });
 
 // 后门：删除用户（按工号）
@@ -1473,7 +1621,7 @@ function sanitizeFormDef(raw) {
 }
 
 // 可被定制卷子的员工名单（供维护页选人）
-//   - 覆盖全部已注册用户（含分管领导 / 支部书记）
+//   - 覆盖全部已注册用户（含支部书记 / 党总支书记）
 //   - 不含「系统管理员」本人：本接口是维护页选人下拉的数据源，
 //     它一进名单，维护者按姓名 / 工号就能调出并改写它的问卷
 //   - customized 附带「已定制过」的 work_id，前端用来打「已定制」标签
@@ -1642,6 +1790,14 @@ app.post('/api/evaluations', (req, res) => {
   if (Number(b.year) > nowD.getFullYear() ||
       (Number(b.year) === nowD.getFullYear() && month > nowD.getMonth() + 1))
     return res.json({ code: 'FUTURE_MONTH', message: '提交时间不能晚于当前月份，请修改后重试' });
+  // 早于开放起点的月份已封档（2026 年 9 月及以前）—— 前端月历同样置为不可选，
+  //   这里是硬边界：改接口参数直接投也没用
+  if (Number(b.year) < EVAL_OPEN_FROM.year ||
+      (Number(b.year) === EVAL_OPEN_FROM.year && month < EVAL_OPEN_FROM.month))
+    return res.json({
+      code: 'MONTH_CLOSED',
+      message: `${EVAL_OPEN_FROM.year} 年 ${EVAL_OPEN_FROM.month} 月之前的月份已封档，无法提交自评`,
+    });
   const scores = JSON.stringify(b.scores || {});
   const ex = workId
     ? db.prepare('SELECT id, reviewStatus FROM evaluation WHERE work_id = ? AND year = ? AND month = ?').get(workId, b.year, month)
@@ -1661,39 +1817,69 @@ app.post('/api/evaluations', (req, res) => {
 });
 app.get('/api/evaluations', (req, res) => {
   // ---- 数据范围（不信任 query 里的身份参数）----
-  //   一律 = 本人自评记录 ∪ 我在 review_assignment 里被指派的审核对象。
-  //   支部书记**不再**「看全体」—— 它与其他身份走完全相同的口径。
+  //   scope=assignments（默认）：**仅** 我在 review_assignment 里被指派的审核对象
+  //   scope=all：本人自评记录 ∪ 我的审核对象（用于自评页 `getMyEvaluation`）
+  //   两种模式下都不「看全体」—— 党总支书记与其他身份走完全相同的口径。
   //   注：branch 不参与过滤 —— 跨支部被指派的对象不应被支部条件筛掉
   const me = req.user;
 
-  const { year, month, status, keyword } = req.query;
+  const { year, month, status, keyword, scope } = req.query;
+  const onlyAssignments = scope === 'assignments';
   let sql = 'SELECT * FROM evaluation WHERE 1=1';
   const args = [];
-  // 可看到的 work_id 集合：自己能自评 → 加自己；有审核指派 → 加被审对象
+  // 可看到的 work_id 集合
   const ids = new Set();
-  if (canSelfEval(me) && me.work_id) ids.add(me.work_id);
+  // assignments 模式严格只取审核对象；否则自评页要能取到自己的记录
+  if (!onlyAssignments && canSelfEval(me) && me.work_id) ids.add(me.work_id);
   for (const t of reviewTargetsOf(me.work_id)) ids.add(t);
   if (!ids.size) return res.json({ code: 'OK', data: [] });
   const list = [...ids];
+  // 我作为审核人的对象集合（小写），用于派生 myReviewStatus
+  const myTargets = new Set(
+    (onlyAssignments ? list : reviewTargetsOf(me.work_id)).map((w) =>
+      String(w || '').toLowerCase()
+    )
+  );
   sql += ` AND work_id IN (${list.map(() => '?').join(',')})`;
   args.push(...list);
-  if (year)    { sql += ' AND year = ?';         args.push(year); }
-  if (month)   { sql += ' AND month = ?';        args.push(month); }
-  if (status)  { sql += ' AND reviewStatus = ?'; args.push(status); }
-  if (keyword) { sql += ' AND name LIKE ?';      args.push('%' + keyword + '%'); }
-  sql += ' ORDER BY createdAt DESC LIMIT 200';
-  res.json({ code: 'OK', data: db.prepare(sql).all(...args).map(r => ({
+  if (year)    { sql += ' AND year = ?';  args.push(year); }
+  if (month)   { sql += ' AND month = ?'; args.push(month); }
+  // status 过滤：审核人列表（scope=assignments）下改按「我的审核状态」过滤。
+  //   reviewers 是 JSON 文本，SQL 里不好查 → 先在 SQL 里不加 LIMIT，取出后在 JS 里过滤。
+  const filterByMine = onlyAssignments && !!status;
+  if (status && !filterByMine) { sql += ' AND reviewStatus = ?'; args.push(status); }
+  if (keyword) { sql += ' AND name LIKE ?'; args.push('%' + keyword + '%'); }
+  sql += ' ORDER BY createdAt DESC';
+  let rows = db.prepare(sql).all(...args).map(r => ({
     ...r,
     scores: r.scores ? JSON.parse(r.scores) : {},
     // 审核版答案：已审核记录供员工端回显「履职扣分」段（未审为 null）
     reviewScores: r.reviewScores ? JSON.parse(r.reviewScores) : null,
-  })) });
+    // 审过这条记录的审核人名单（[{workId,name,at}]）；空数组 = 老数据尚未记录
+    reviewers: parseJsonArray(r.reviewers),
+    // 「我审过没有」—— 审核人列表的状态列 / 筛选 / 计数一律看它，不看 reviewStatus
+    myReviewStatus: myReviewStatusOf(me, r, myTargets),
+    overriddenByOther: overriddenByOther(me, r),
+  }));
+  // 审核关系只对建立当月及未来生效：砍掉「关系建立之前」的历史记录。
+  //   这样今天新增一条审核关系，被审核人历史月份的自评不会突然冒到审核人列表里
+  //   （就算前端把月份筛到「全年」也不会）。
+  const fromPeriods = reviewTargetFromPeriodsOf(me.work_id);
+  rows = rows.filter((r) => {
+    const from = fromPeriods.get(String(r.work_id).toLowerCase());
+    if (from === undefined) return true;
+    if (periodOf(r.year, r.month) >= from) return true;
+    // 例外：我本人审过的历史记录始终保留（误删再补审核关系时不丢）
+    return reviewedByMe(me, r);
+  });
+  if (filterByMine) rows = rows.filter((r) => r.myReviewStatus === status);
+  res.json({ code: 'OK', data: rows.slice(0, 200) });
 });
 
 // 「未提交自评人数」统计
 //   统计口径：*我的审核对象* 中，该年/该月尚未提交自评的人
 //     - 一律取 review_assignment 里指给我的对象
-//     - 支部书记不再「统计全体」—— 其范围同样来自本表，刚注册时为空 → total=0
+//     - 党总支书记不再「统计全体」—— 其范围同样来自本表，刚注册时为空 → total=0
 // 说明：month 必传；按 work_id 去重
 app.get('/api/evaluations/unsubmitted', (req, res) => {
   const me = req.user;
@@ -1704,7 +1890,14 @@ app.get('/api/evaluations/unsubmitted', (req, res) => {
   const m = Number(month);
 
   // 应提交自评的人 = review_assignment 里指派给我的对象
-  const ids = reviewTargetsOf(me.work_id);
+  //   同样按「审核关系只对建立当月及未来生效」截断：查询的年月早于关系建立月份的对象不计入分母，
+  //   否则会出现「列表是空的，但统计卡显示 N 人未提交」
+  const fromPeriods = reviewTargetFromPeriodsOf(me.work_id);
+  const p = periodOf(y, m);
+  const ids = reviewTargetsOf(me.work_id).filter((w) => {
+    const from = fromPeriods.get(String(w).toLowerCase());
+    return from === undefined || p >= from;
+  });
   if (!ids.length)
     return res.json({ code: 'OK', data: { total: 0, submitted: 0, unsubmitted: 0, list: [] } });
   // 兜底：即便系统管理员被误指派成「被审核人」，也不出现在待提交自评名单里
@@ -1759,6 +1952,14 @@ app.get('/api/evaluations/:id', (req, res) => {
       ...rec,
       scores: rec.scores ? JSON.parse(rec.scores) : {},
       reviewScores: rec.reviewScores ? JSON.parse(rec.reviewScores) : null,
+      reviewers: parseJsonArray(rec.reviewers),
+      // 审核表单页用它区分「我审过」和「别人审过但我没审」
+      myReviewStatus: myReviewStatusOf(
+        me,
+        rec,
+        new Set(reviewTargetsOf(me.work_id).map((w) => String(w || '').toLowerCase()))
+      ),
+      overriddenByOther: overriddenByOther(me, rec),
     },
   });
 });
@@ -1766,7 +1967,7 @@ app.get('/api/evaluations/:id', (req, res) => {
 app.patch('/api/evaluations/:id/review', (req, res) => {
   // ---- 鉴权：支书(全体) / 我的审核对象 ----
   const me = req.user;
-  const rec = db.prepare('SELECT work_id FROM evaluation WHERE id = ?').get(req.params.id);
+  const rec = db.prepare('SELECT work_id, reviewers FROM evaluation WHERE id = ?').get(req.params.id);
   if (!rec) return res.json({ code: 'NOT_FOUND' });
   if (!canReviewEvaluation(me, rec))
     return deny(res, '无权审核自评');
@@ -1780,9 +1981,21 @@ app.patch('/api/evaluations/:id/review', (req, res) => {
   const isPlainObject = scores && typeof scores === 'object' && !Array.isArray(scores);
   const reviewScoresJson = isPlainObject ? JSON.stringify(scores) : null;
 
+  // 累积「谁审过这条记录」：按审核人工号去重 upsert（同一个人重审只更新他的时间）
+  //   注意：只累积名单，不另存一份分数 —— 分数 / 意见 / 定稿答案仍是单一槽位，后提交者覆盖
+  const at = now();
+  const myWorkId = String(me.work_id || '');
+  const prevReviewers = parseJsonArray(rec.reviewers).filter(
+    (x) => String(x?.workId || '') !== myWorkId
+  );
+  const reviewersJson = JSON.stringify([
+    ...prevReviewers,
+    { workId: myWorkId, name: me.name || '', at },
+  ]);
+
   // 审核人姓名绑定 token 身份（不信任 body 里的 reviewerName）
-  const r = db.prepare(`UPDATE evaluation SET reviewScore=?, reviewComment=?, reviewScores=?, reviewerName=?, reviewedAt=?, reviewStatus='reviewed', updatedAt=? WHERE id=?`)
-    .run(Number(reviewScore), reviewComment || '', reviewScoresJson, me.name, now(), now(), req.params.id);
+  const r = db.prepare(`UPDATE evaluation SET reviewScore=?, reviewComment=?, reviewScores=?, reviewerName=?, reviewedAt=?, reviewers=?, reviewStatus='reviewed', updatedAt=? WHERE id=?`)
+    .run(Number(reviewScore), reviewComment || '', reviewScoresJson, me.name, at, reviewersJson, at, req.params.id);
   res.json(r.changes ? { code: 'OK' } : { code: 'NOT_FOUND' });
 });
 app.delete('/api/evaluations/:id', (req, res) => {
@@ -1890,11 +2103,11 @@ function ensureAllBranches() {
 }
 
 // ============================================================
-// 年度红线扣分（discipline 表，分管领导 admin_type=0 审核）
+// 年度红线扣分（discipline 表，支部书记 admin_type=0 审核）
 // ------------------------------------------------------------
 // 与 rating 的三点区别：
 //   ① 一年一条（无 month），UNIQUE(work_id, year)
-//   ② 审核人是分管领导（本支部），不是组织委员
+//   ② 审核人是支部书记（本支部），不是组织委员
 //   ③ 分数只扣不加：reviewScore ≤ 0（年度总分里作为「年度红线总扣分」直接相加）
 // 记录生成规则（与 rating 完全同思路：惰性 + 兜底，幂等）：
 //   ① 任何人登录时 → 补齐「本人所在支部」当年的记录（每年第一次登录即生成）
@@ -1956,24 +2169,24 @@ function ensureDisciplineAllBranches() {
   return { branches: branches.length, created };
 }
 
-// 查询 rating 列表（组织委员 / 支部书记）
+// 查询 rating 列表（组织委员 / 党总支书记）
 //   month 可选：不传 = 全年（与「年度」筛选配合）
 //   status / keyword 可选筛选
 //   branch 由角色决定：组织委员强制 me.branch（query 里的 branch 被忽略），
-//                     支部书记不按支部过滤（看全支部）
+//                     党总支书记不按支部过滤（看全支部）
 // 查询范围覆盖「当前年月」时顺带惰性生成当月的待审核记录
 app.get('/api/ratings', (req, res) => {
-  // ---- 鉴权：仅组织委员（本支部）/ 支部书记（全支部）----
+  // ---- 鉴权：仅组织委员（本支部）/ 党总支书记（全支部）----
   const me = req.user;
   if (!isOrganizer(me) && !isSecretary(me)) return deny(res, '无权查询基础积分记录');
-  const effectiveBranch = isOrganizer(me) ? me.branch : null; // 书记 → null = 全支部
+  const effectiveBranch = isOrganizer(me) ? me.branch : null; // 党总支书记 → null = 全支部
 
   const { year, month, status, keyword } = req.query;
   if (!year) return res.json({ code: 'BAD_INPUT', message: '缺少 year' });
 
   const nowD = new Date();
   // 查询范围覆盖「当前年月」时顺带生成当月记录（跨月第一次访问即补齐）：
-  //   组织委员 → 本支部；支部书记 → 所有支部都补齐
+  //   组织委员 → 本支部；党总支书记 → 所有支部都补齐
   if (
     Number(year) === nowD.getFullYear() &&
     (!month || Number(month) === nowD.getMonth() + 1)
@@ -1989,7 +2202,7 @@ app.get('/api/ratings', (req, res) => {
   let sql = 'SELECT * FROM rating WHERE year = ?';
   const args = [year];
   if (effectiveBranch) { sql += ' AND partyBranch = ?'; args.push(effectiveBranch); }
-  // 组织委员：只看 admin_type IN (1,3) 的被评对象（本支部）；支部书记不限（全体）
+  // 组织委员：只看 admin_type IN (1,3) 的被评对象（本支部）；党总支书记不限（全体）
   if (isOrganizer(me)) {
     sql += ` AND work_id IN (SELECT work_id FROM user_table WHERE admin_type IN (${BASIC_RATING_TYPES.map(() => '?').join(',')}))`;
     args.push(...BASIC_RATING_TYPES);
@@ -2006,7 +2219,7 @@ app.get('/api/ratings', (req, res) => {
   });
 });
 
-// 所有普通党员所在的支部列表（去重，供支部书记视图按支部遍历）
+// 所有普通党员所在的支部列表（去重，供党总支书记视图按支部遍历）
 function distinctEmployeeBranches() {
   const typePh = BASIC_RATING_TYPES.map(() => '?').join(',');
   return db
@@ -2020,7 +2233,7 @@ function distinctEmployeeBranches() {
 
 // 组织委员审核 / 更新某条 rating
 app.patch('/api/ratings/:id/review', (req, res) => {
-  // ---- 鉴权：组织委员（限本支部）/ 支部书记（全支部）----
+  // ---- 鉴权：组织委员（限本支部）/ 党总支书记（全支部）----
   const me = req.user;
   if (!isOrganizer(me) && !isSecretary(me)) return deny(res, '无权评分');
   const rec = db.prepare('SELECT partyBranch FROM rating WHERE id = ?').get(req.params.id);
@@ -2047,7 +2260,7 @@ app.patch('/api/ratings/:id/review', (req, res) => {
 // 便于完整回放每道题的扣分方式。
 // 注：不再接受 body 里的 work_id 回填（不可信来源）；rating 记录生成时已带 work_id
 app.patch('/api/ratings/:id/extra-deduct-review', (req, res) => {
-  // ---- 鉴权：组织委员（限本支部）/ 支部书记（全支部）----
+  // ---- 鉴权：组织委员（限本支部）/ 党总支书记（全支部）----
   const me = req.user;
   if (!isOrganizer(me) && !isSecretary(me)) return deny(res, '无权评分');
   const rec = db.prepare('SELECT partyBranch FROM rating WHERE id = ?').get(req.params.id);
@@ -2072,7 +2285,7 @@ app.patch('/api/ratings/:id/extra-deduct-review', (req, res) => {
 });
 
 // ============================================================
-// 年度红线扣分（分管领导 admin_type=0 专用）
+// 年度红线扣分（支部书记 admin_type=0 专用）
 // ------------------------------------------------------------
 // 列表：本支部（me.branch）该年度、admin_type IN (1,3) 的记录，一年一人一条。
 //   查询范围覆盖的年份会顺带惰性生成（幂等），保证「跨年第一次打开就有数据」。
@@ -2081,8 +2294,8 @@ app.patch('/api/ratings/:id/extra-deduct-review', (req, res) => {
 // ============================================================
 app.get('/api/disciplines', (req, res) => {
   // ---- 鉴权 ----
-  //   支部书记 → 可见**全部支部**（跨支部审核）
-  //   分管领导 → 只能看自己支部
+  //   党总支书记 → 可见**全部支部**（跨支部审核）
+  //   支部书记 → 只能看自己支部
   const me = req.user;
   if (!(isLeader(me) || isSecretary(me)))
     return deny(res, '无权查询年度红线扣分记录');
@@ -2091,10 +2304,10 @@ app.get('/api/disciplines', (req, res) => {
   if (!year) return res.json({ code: 'BAD_INPUT', message: '缺少 year' });
 
   const allBranches = isSecretary(me);
-  const branch = me.branch || ''; // 分管领导用；支部为空（老数据）时退化为全部，避免列表整体为空
+  const branch = me.branch || ''; // 支部书记用；支部为空（老数据）时退化为全部，避免列表整体为空
   // 惰性生成：查哪年就补哪年（跨年第一次打开页面即生成）
   if (allBranches) {
-    // 书记看全部支部 → 逐个支部补齐，保证别的支部也有当年记录
+    // 党总支书记看全部支部 → 逐个支部补齐，保证别的支部也有当年记录
     for (const b of distinctEmployeeBranches()) ensureDisciplineForYear(b, Number(year));
   } else if (branch) {
     ensureDisciplineForYear(branch, Number(year));
@@ -2102,7 +2315,7 @@ app.get('/api/disciplines', (req, res) => {
 
   let sql = 'SELECT * FROM discipline WHERE year = ?';
   const args = [Number(year)];
-  // 分管领导限定本支部；书记不加该条件（全部支部）
+  // 支部书记限定本支部；党总支书记不加该条件（全部支部）
   if (!allBranches && branch) { sql += ' AND partyBranch = ?'; args.push(branch); }
   // 只显示「被评对象」admin_type IN (1,3)（组织委员 + 普通党员）
   const typePh = BASIC_RATING_TYPES.map(() => '?').join(',');
@@ -2119,7 +2332,7 @@ app.get('/api/disciplines', (req, res) => {
   });
 });
 
-// 分管领导提交某条年度红线扣分（问卷形式）
+// 支部书记提交某条年度红线扣分（问卷形式）
 //   scores       每题答案快照（写入 discipline.scores JSON 列）
 //   reviewScore  扣分合计（负数；无扣分项时为 0）
 //   reviewComment 固定空串（页面已取消整体扣分原因输入框）
@@ -2128,7 +2341,7 @@ app.patch('/api/disciplines/:id/review', (req, res) => {
   if (!(isLeader(me) || isSecretary(me))) return deny(res, '无权评分');
   const rec = db.prepare('SELECT partyBranch FROM discipline WHERE id = ?').get(req.params.id);
   if (!rec) return res.json({ code: 'NOT_FOUND' });
-  // 支部书记可跨支部评分；分管领导只能评自己支部的记录
+  // 党总支书记可跨支部评分；支部书记只能评自己支部的记录
   if (!isSecretary(me) && me.branch && rec.partyBranch !== me.branch)
     return deny(res, '只能评分本支部的记录');
 
@@ -2150,14 +2363,14 @@ app.patch('/api/disciplines/:id/review', (req, res) => {
 });
 
 // ============================================================
-// 年度专项加分审核（支部书记 / 分管领导，从 credit 表读）
+// 年度专项加分审核（党总支书记 / 支部书记，从 credit 表读）
 // ------------------------------------------------------------
 // 与「年度红线扣分审核」同构，两处关键差异：
 //   ① **不做惰性生成**：credit 由本人申报产生（一年一条 UNIQUE(work_id, year)），
 //      没人申报就是没有记录 —— 当年没待审核记录就直接显示空列表，不造空壳数据。
 //   ② **不限 admin_type**：红线是自动给「被评对象」生成的所以过滤了类型；
 //      加分谁都可能申报，因此不加类型过滤，库里有谁就审谁。
-// 可见范围（后端强制）：支部书记 → 全部支部；分管领导 → 仅自己支部。
+// 可见范围（后端强制）：党总支书记 → 全部支部；支部书记 → 仅自己支部。
 // ============================================================
 // credit 表：**审核版答案**列 reviewScores（与 evaluation.reviewScores 同用途 ——
 //   员工原始申报 scores 不动，审核人改过的答案单独存这里，员工页回显「审核结果」时读它）
@@ -2179,11 +2392,11 @@ app.get('/api/credits', (req, res) => {
   if (!year) return res.json({ code: 'BAD_INPUT', message: '缺少 year' });
 
   const allBranches = isSecretary(me);
-  const branch = me.branch || ''; // 分管领导用；支部为空（老数据）时退化为全部
+  const branch = me.branch || ''; // 支部书记用；支部为空（老数据）时退化为全部
 
   let sql = 'SELECT * FROM credit WHERE year = ?';
   const args = [Number(year)];
-  // 分管领导限定本支部；书记不加该条件（全部支部）
+  // 支部书记限定本支部；党总支书记不加该条件（全部支部）
   if (!allBranches && branch) { sql += ' AND partyBranch = ?'; args.push(branch); }
   if (status)  { sql += ' AND reviewStatus = ?'; args.push(status); }
   if (keyword) { sql += ' AND name LIKE ?';      args.push('%' + keyword + '%'); }
@@ -2200,6 +2413,65 @@ app.get('/api/credits', (req, res) => {
   });
 });
 
+// 「未申报人数」统计（审核页第三张统计卡片 + 未申报名单弹窗）
+// ------------------------------------------------------------
+// 与「履职贡献」那份逻辑同源，唯一差别是**分母的取法**：
+//   · 履职贡献按 review_assignment 里指派给我的人；
+//   · 专项加分没有指派关系，且 credit **不做惰性生成**（没人申报就没有记录），
+//     因此必须以 user_table 为分母 —— 否则一个数都没有。
+// 应申报的人 = 可见范围内、admin_type IN (1,3)（组织委员 + 普通党员，
+//   即侧边栏有「年度专项加分申请提交」入口的人）里还没申报的人。
+// 可见范围（后端强制，与 GET /api/credits 完全一致）：
+//   · 支部书记   → 仅本支部（me.branch）；本人没有支部时不给数（避免越权看到别的支部）
+//   · 党总支书记 → 全部支部（两个支部合计）
+app.get('/api/credits/unsubmitted', (req, res) => {
+  const me = req.user;
+  if (!(isLeader(me) || isSecretary(me)))
+    return deny(res, '无权查询年度专项加分申报情况');
+
+  const year = Number(req.query.year);
+  if (!year) return res.json({ code: 'BAD_INPUT', message: '缺少 year' });
+
+  const empty = { total: 0, submitted: 0, unsubmitted: 0, list: [] };
+  const allBranches = isSecretary(me);
+  const branch = String(me?.branch || '').trim();
+  if (!allBranches && !branch) return res.json({ code: 'OK', data: empty });
+
+  const typePh = BASIC_RATING_TYPES.map(() => '?').join(',');
+  const args = [...BASIC_RATING_TYPES];
+  let sql = `SELECT user_id, name, work_id FROM user_table
+              WHERE admin_type IN (${typePh})
+                AND work_id IS NOT NULL AND work_id != ''`;
+  if (!allBranches) {
+    sql += ' AND branch = ?';
+    args.push(branch);
+  }
+  const members = db.prepare(sql).all(...args);
+  const ids = members.map((u) => u.work_id).filter(Boolean);
+  if (!ids.length) return res.json({ code: 'OK', data: empty });
+
+  const submitted = new Set(
+    db
+      .prepare(
+        `SELECT work_id FROM credit
+          WHERE year = ? AND work_id IN (${ids.map(() => '?').join(',')})`
+      )
+      .all(year, ...ids)
+      .map((r) => r.work_id)
+      .filter(Boolean)
+  );
+  const list = members.filter((u) => !submitted.has(u.work_id));
+  res.json({
+    code: 'OK',
+    data: {
+      total: members.length,      // 应申报人数
+      submitted: submitted.size,  // 已申报人数
+      unsubmitted: list.length,   // 未申报人数
+      list: list.map((u) => ({ user_id: u.user_id, name: u.name, work_id: u.work_id })),
+    },
+  });
+});
+
 // 提交某条年度专项加分的审核结果
 //   scores        审核版答案 { answers, snapshot }（审核人可在卷子上改选项 / 次数 / 事由）
 //                 → 写入 reviewScores 列；员工原始申报的 scores **不动**
@@ -2210,7 +2482,7 @@ app.patch('/api/credits/:id/review', (req, res) => {
   if (!(isLeader(me) || isSecretary(me))) return deny(res, '无权审核');
   const rec = db.prepare('SELECT partyBranch FROM credit WHERE id = ?').get(req.params.id);
   if (!rec) return res.json({ code: 'NOT_FOUND' });
-  // 支部书记可跨支部审核；分管领导只能审自己支部的记录
+  // 党总支书记可跨支部审核；支部书记只能审自己支部的记录
   if (!isSecretary(me) && me.branch && rec.partyBranch !== me.branch)
     return deny(res, '只能审核本支部的记录');
 
@@ -2238,7 +2510,7 @@ app.patch('/api/credits/:id/review', (req, res) => {
 
 // 本人某年度的红线扣分记录（给「个人积分查询 → 全年 → 年度红线总扣分 → 查看评价」用）
 // ------------------------------------------------------------
-// 与 /api/disciplines（分管领导 / 书记审核用的列表）不同：
+// 与 /api/disciplines（支部书记 / 党总支书记审核用的列表）不同：
 //   这里任何登录用户都能调，且**只能取自己那一条**（按 token 里的 work_id 限定，无越权可能）。
 //   本人所在支部当年没生成记录时顺带惰性补齐（幂等），保证跨年第一次查看就有数据。
 // 返回 null = 该年度没有本人记录（例如本人不是被评对象 admin_type IN (1,3)）。
@@ -2423,7 +2695,7 @@ const resolveScoreTarget = (req) => {
     workId = me.work_id || '';
     name = me.name || '';
   } else if (!isLeader(me) && !isSecretary(me)) {
-    // 分管领导(0) / 支部书记(2)：可传任意 work_id/name（供后续「全成员排名」复用）
+    // 支部书记(0) / 党总支书记(2)：可传任意 work_id/name（供后续「全成员排名」复用）
     return { err: { code: 'FORBIDDEN', message: '无权查询积分' } };
   }
   if (!workId && !name)
@@ -2439,7 +2711,7 @@ const resolveScoreTarget = (req) => {
 //   ② 履职贡献先 capEval40（> 40 按 40），基础积分不封顶
 //   ③ 总分 = 基础积分 + 履职贡献
 // 参与范围：本支部（user_table.branch = 本人支部）内 admin_type IN (1,3)（组织委员 + 普通党员）
-//   分管领导(0) / 支部书记(2) 不自评、没有分数 → 不参与；系统管理员(9) 同样不在内
+//   支部书记(0) / 党总支书记(2) 不自评、没有分数 → 不参与；系统管理员(9) 同样不在内
 //   跨支部的人不计入 —— 各支部独立排名，与「积分汇总」的支部范围保持一致
 //   注：branch 为空（老数据 / 查不到）时退化为全单位，避免整个排名消失
 // 只统计「本月两项（基础积分 + 履职贡献）**都已审核**」的人：
@@ -2805,6 +3077,18 @@ const parseJsonObj = (v) => {
   }
 };
 
+// JSON 数组列安全解析（列是 TEXT；脏数据/空值回落 []）
+const parseJsonArray = (v) => {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  try {
+    const x = JSON.parse(v);
+    return Array.isArray(x) ? x : [];
+  } catch {
+    return [];
+  }
+};
+
 // 基础积分「具体事宜」：列出所有数量不为 0 的扣分题
 //   [{ key, label（题干）, count（次数）, unit（题目里的单位）, reason（事由） }]
 //   数据源：rating.scores = { answers: {key:{count,reason}}, snapshot: {key:{label,unit,input,reason,...}} }
@@ -2868,9 +3152,10 @@ function buildContributionMatters(reviewScoresRaw) {
 }
 
 app.get('/api/summary/monthly', (req, res) => {
-  // ---- 鉴权：组织委员 / 支部书记 / 分管领导 都可看（可见范围在下面限定）----
+  // ---- 鉴权：组织委员 / 党总支书记 / 支部书记 / 分管领导 都可看（可见范围在下面限定）----
+  //   分管领导(4) 走侧边栏「支部积分查询」进来，同样能在两个支部 / 全体成员之间切换
   const me = req.user;
-  if (!(isOrganizer(me) || isSecretary(me) || isLeader(me)))
+  if (!(isOrganizer(me) || isSecretary(me) || isLeader(me) || isDirector(me)))
     return deny(res, '无权查看积分汇总');
 
   const year = Number(req.query.year);
@@ -2883,7 +3168,7 @@ app.get('/api/summary/monthly', (req, res) => {
   //   all            → 全体成员（所有支部）
   //   first / second → 指定支部
   //   不传           → 本人所在支部
-  // 组织委员**不再**被锁在本支部（2026-10-16 改）：与支部书记 / 分管领导一样可以选别的支部或全体
+  // 组织委员**不再**被锁在本支部（2026-10-16 改）：与党总支书记 / 支部书记一样可以选别的支部或全体
   let branch = String(req.query.branch || '').trim();
   if (!branch) branch = me.branch || '';
   const allBranches = branch === 'all';
@@ -2998,7 +3283,7 @@ function buildAnnualMatters(raw) {
 }
 
 // ============================================================
-// 年度积分汇总（组织委员 / 支部书记 / 分管领导）
+// 年度积分汇总（组织委员 / 党总支书记 / 支部书记）
 // ------------------------------------------------------------
 // 与「月度积分汇总」同构（支部筛选 + 具体事宜 + 导出），口径差异：
 //   ① 基础积分       = 该年**有基础积分记录的月份**的 reviewScore 平均（只算已审核）
@@ -3012,7 +3297,7 @@ function buildAnnualMatters(raw) {
 // ============================================================
 app.get('/api/summary/annual', (req, res) => {
   const me = req.user;
-  if (!(isOrganizer(me) || isSecretary(me) || isLeader(me)))
+  if (!(isOrganizer(me) || isSecretary(me) || isLeader(me) || isDirector(me)))
     return deny(res, '无权查看积分汇总');
 
   const year = Number(req.query.year);
@@ -3253,7 +3538,7 @@ runEnsureAll('启动');
 setInterval(() => runEnsureAll('定时'), ENSURE_INTERVAL_MS);
 
 // ============================================================
-// 支部书记账号已改为「白名单登记 + 自行注册」：
+// 党总支书记账号已改为「白名单登记 + 自行注册」：
 //   - 工号 000001 / 000002 登记为 admin_type=2（见 admin-whitelist.mjs）
 //   - 不再由后端 seed 生成，故此处无内置账号逻辑
 // ============================================================

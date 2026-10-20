@@ -1,8 +1,8 @@
-// 积分汇总（组织委员 / 支部书记 / 分管领导可见）
+// 积分汇总（组织委员 / 党总支书记 / 支部书记可见）
 // ------------------------------------------------------------
 // 可见范围（后端按身份限定）：
 //   - 组织委员：只能看自己支部（前端筛选框锁定）
-//   - 支部书记 / 分管领导：可在「第一党支部 / 第二党支部 / 全体成员」之间切换
+//   - 党总支书记 / 支部书记：可在「第一党支部 / 第二党支部 / 全体成员」之间切换
 // ------------------------------------------------------------
 // 两个子模块（进入页面后用 Tabs 切换）：
 //   ① 月度积分汇总：年份 + 月份下拉 → 本支部所有党员该月的基础积分 / 履职贡献 / 总分
@@ -52,6 +52,7 @@ import {
 } from '../lib/excel';
 import { getBranchMonthlySummary, getBranchAnnualSummary } from '../lib/cloudbase';
 import { useAuth } from '../context/AuthContext';
+import { useIsMobile } from '../lib/useIsMobile';
 
 const { Title, Text } = Typography;
 
@@ -64,7 +65,7 @@ const MONTH_OPTIONS = Array.from({ length: 12 }, (_, i) => ({
   value: i + 1,
   label: `${i + 1} 月`,
 }));
-// 支部筛选（组织委员 / 支部书记 / 分管领导都可用；'all' = 全体成员）
+// 支部筛选（组织委员 / 党总支书记 / 支部书记都可用；'all' = 全体成员）
 const BRANCH_OPTIONS = [{ value: 'all', label: '全体成员' }, ...BRANCHES];
 
 // 列表里的「具体事宜」：内容较长放不下，只显示条数，完整内容点「查看」在弹窗里看
@@ -105,7 +106,9 @@ function MattersBlock({ items = [], extraComment = '' }) {
   );
 }
 
-export default function ScoreSummary() {
+// title：页面标题。分管领导走 /branch-score-query 进来时叫「支部积分查询」，
+//   其余身份走 /score-summary 叫「支部积分汇总」—— 两者共用本页实现。
+export default function ScoreSummary({ title = '支部积分汇总' }) {
   const { user } = useAuth();
   const [tab, setTab] = useState('monthly');
 
@@ -113,7 +116,7 @@ export default function ScoreSummary() {
     <div>
       <Title level={3} style={{ marginTop: 0 }}>
         <LineChartOutlined style={{ marginRight: 8, color: '#1677ff' }} />
-        支部积分汇总
+        {title}
       </Title>
 
       <Card style={{ marginTop: 16 }}>
@@ -152,13 +155,15 @@ const baseTotalOf = (keys) => keys.reduce((s, k) => s + COL_BASE_WIDTHS[k], 0);
 // ===== 子模块 ①：月度积分汇总 =====
 function MonthlySummary() {
   const { user } = useAuth(); // 导出文件名要用支部名（第一/第二党支部）
+  const isMobile = useIsMobile(); // 窄屏：弹窗占满视口、详情改成单列
   const [year, setYear] = useState(currentYear);
   const [month, setMonth] = useState(dayjs().month() + 1);
   const [loading, setLoading] = useState(false);
   const [rows, setRows] = useState([]);
   const [detail, setDetail] = useState(null); // 当前查看的条目（null = 弹窗关闭）
-  // 支部筛选：默认本人支部；组织委员 / 书记 / 分管领导都可改（含「全体成员」）
-  const [branchFilter, setBranchFilter] = useState(user?.branch || '');
+  // 支部筛选：默认本人支部；组织委员 / 党总支书记 / 支部书记 / 分管领导都可改（含「全体成员」）
+  //   本人没有支部时回落「全体成员」，避免空值导致列表为空
+  const [branchFilter, setBranchFilter] = useState(user?.branch || 'all');
 
   // 测量表格可用宽度：用于把剩余空间平均分给每一列
   const tableWrapRef = useRef(null);
@@ -325,10 +330,9 @@ function MonthlySummary() {
             style={{ width: 120 }}
           />
         </Space>
-        <Tag color="blue">{`${year} 年 ${month} 月`}</Tag>
         <Space>
           <Text strong>支部</Text>
-          {/* 组织委员与书记 / 分管领导一样可任选支部或全体（不再锁在本支部） */}
+          {/* 组织委员与党总支书记 / 支部书记一样可任选支部或全体（不再锁在本支部） */}
           <Select
             value={branchFilter}
             onChange={setBranchFilter}
@@ -385,10 +389,10 @@ function MonthlySummary() {
         title={detail ? `${detail.name} · ${year} 年 ${month} 月积分明细` : ''}
         onCancel={() => setDetail(null)}
         footer={null}
-        width={720}
+        width={isMobile ? '92vw' : 720}
       >
         {detail && (
-          <Descriptions bordered column={2} size="small">
+          <Descriptions bordered column={isMobile ? 1 : 2} size="small">
             <Descriptions.Item label="姓名">{detail.name}</Descriptions.Item>
             <Descriptions.Item label="工作证编号">{detail.workId}</Descriptions.Item>
             <Descriptions.Item label="党支部" span={2}>
@@ -451,11 +455,12 @@ const ANNUAL_COL_KEYS = Object.keys(ANNUAL_COL_BASE_WIDTHS);
 
 function AnnualSummary() {
   const { user } = useAuth();
+  const isMobile = useIsMobile(); // 窄屏：弹窗占满视口、详情改成单列
   const [year, setYear] = useState(currentYear);
   const [loading, setLoading] = useState(false);
   const [rows, setRows] = useState([]);
   const [detail, setDetail] = useState(null); // 当前查看的条目
-  const [branchFilter, setBranchFilter] = useState(user?.branch || '');
+  const [branchFilter, setBranchFilter] = useState(user?.branch || 'all');
 
   // 列宽：剩余空间平均分配（与月度汇总同一套做法）
   const tableWrapRef = useRef(null);
@@ -651,10 +656,9 @@ function AnnualSummary() {
             style={{ width: 120 }}
           />
         </Space>
-        <Tag color="blue">{`${year} 年度`}</Tag>
         <Space>
           <Text strong>支部</Text>
-          {/* 组织委员与书记 / 分管领导一样可任选支部或全体（不再锁在本支部） */}
+          {/* 组织委员与党总支书记 / 支部书记一样可任选支部或全体（不再锁在本支部） */}
           <Select
             value={branchFilter}
             onChange={setBranchFilter}
@@ -704,10 +708,10 @@ function AnnualSummary() {
         title={detail ? `${detail.name} · ${year} 年度积分明细` : ''}
         onCancel={() => setDetail(null)}
         footer={null}
-        width={760}
+        width={isMobile ? '92vw' : 760}
       >
         {detail && (
-          <Descriptions bordered column={2} size="small">
+          <Descriptions bordered column={isMobile ? 1 : 2} size="small">
             <Descriptions.Item label="姓名">{detail.name}</Descriptions.Item>
             <Descriptions.Item label="工作证编号">{detail.workId}</Descriptions.Item>
             <Descriptions.Item label="党支部" span={2}>

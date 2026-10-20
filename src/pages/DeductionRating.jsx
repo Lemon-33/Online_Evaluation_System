@@ -350,7 +350,8 @@ export default function DeductionRating() {
 
       <Row gutter={16}>
         {/* 左侧：问卷 */}
-        <Col span={16}>
+        {/* 窄屏（<768px）左栏整行，右栏（合计卡）掉到下面 */}
+        <Col span={16} xs={24} md={16}>
           {sections.map((sec) => (
             <Card
               key={sec.title}
@@ -488,7 +489,7 @@ export default function DeductionRating() {
               - 整体扣分原因                                     → 不采集，reviewComment = ''
               - 累加得分 / 总扣分 / 基础分                       → rating.scores 内冗余字段
             提交校验：已扣分的题必须填写该题具体事由；无扣分可留空。 */}
-        <Col span={8}>
+        <Col span={8} xs={24} md={8}>
           <Card
             className="score-card"
             title={

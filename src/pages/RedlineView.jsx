@@ -41,7 +41,7 @@ import { useAuth } from '../context/AuthContext';
 
 // 年度红线扣分详情（党员只读浏览自己某一年的红线卷子）
 // ------------------------------------------------------------
-// 数据源：discipline 表（人 × 年，由分管领导 / 支部书记核定）
+// 数据源：discipline 表（人 × 年，由支部书记 / 党总支书记核定）
 // 与「基础积分评价详情」同构（左卷子 / 右扣分卡、顶部返回 + banner + 状态提示），
 // 差异只在：这是**年度**口径（无月份），分数是纯扣分（≤ 0，展示为「扣 X 分」）。
 // 入口：个人积分查询 → 全年 → 「年度红线总扣分」卡片下方「查看评价」
@@ -151,16 +151,8 @@ export default function RedlineView() {
         message={
           <Space>
             <span style={{ fontWeight: 600 }}>年度红线扣分详情 · {year} 年</span>
-            {/* 人名统一黑色显示 */}
-            <Tag color="default" style={{ color: '#000' }}>
-              {user?.name}
-            </Tag>
-            <Tag color="purple">
-              {findPositionLabel(user?.position)} · {findLabel(POSITION_TYPES, user?.positionType)}
-            </Tag>
           </Space>
         }
-        description="您只能查看自己的年度红线扣分记录，无法访问其他党员的信息。"
         style={{ marginBottom: 16 }}
       />
 
@@ -171,7 +163,7 @@ export default function RedlineView() {
           type={deduction > 0 ? 'warning' : 'success'}
           icon={deduction > 0 ? <WarningOutlined /> : <CheckCircleOutlined />}
           style={{ marginBottom: 16 }}
-          message={`本年度红线事项已由 ${record.reviewerName || '分管领导'} 核定，${
+          message={`本年度红线事项已由 ${record.reviewerName || '支部书记'} 核定，${
             deduction > 0 ? `共扣 ${deduction} 分` : '未发现红线事项，扣 0 分'
           }，如需复核请联系所属支部管理员`}
         />
@@ -183,7 +175,7 @@ export default function RedlineView() {
           icon={<InfoCircleOutlined />}
           style={{ marginBottom: 16 }}
           message="本年度红线事项尚未完成核定"
-          description="分管领导 / 支部书记核定完成后，将在这里显示扣分明细与具体事由。"
+          description="支部书记 / 党总支书记核定完成后，将在这里显示扣分明细与具体事由。"
         />
       )}
       {!record && (
@@ -199,7 +191,8 @@ export default function RedlineView() {
       <Spin spinning={loading}>
         <Row gutter={16}>
           {/* 左：人员信息 + 红线卷子（只读） */}
-          <Col span={16}>
+          {/* 窄屏（<768px）左栏整行，右栏（扣分合计卡）掉到下面 */}
+          <Col span={16} xs={24} md={16}>
             {record && (
               <Card style={{ marginBottom: 16 }}>
                 <Descriptions size="small" column={3} bordered>
@@ -228,7 +221,7 @@ export default function RedlineView() {
           </Col>
 
           {/* 右：扣分卡 */}
-          <Col span={8}>
+          <Col span={8} xs={24} md={8}>
             <Card
               title={
                 <Space>
@@ -262,7 +255,7 @@ export default function RedlineView() {
               />
               {isReviewed && (
                 <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)', marginTop: 8 }}>
-                  核定人：{record.reviewerName || '分管领导'} ·{' '}
+                  核定人：{record.reviewerName || '支部书记'} ·{' '}
                   {record.reviewedAt || ''}
                 </div>
               )}

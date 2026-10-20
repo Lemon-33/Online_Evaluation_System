@@ -177,7 +177,7 @@ export async function getMyEvaluation(name, year, month, workId) {
 // 评价列表（带筛选）
 // branch: 传入党支部 value（'first' / 'second'）时，只返回该支部的评价
 // month: 传 1-12 时只返回该月的自评，不传返回全年
-export async function listEvaluations({ year, month, status, keyword, branch } = {}) {
+export async function listEvaluations({ year, month, status, keyword, branch, scope } = {}) {
   if (USE_MOCK) {
     let list = readMock();
     if (year) list = list.filter((x) => x.year === year);
@@ -194,6 +194,7 @@ export async function listEvaluations({ year, month, status, keyword, branch } =
   if (status) params.status = status;
   if (keyword) params.keyword = keyword;
   if (branch) params.branch = branch;
+  if (scope) params.scope = scope;
   const qs = new URLSearchParams(params).toString();
   const res = await apiRequest(`/api/evaluations${qs ? `?${qs}` : ''}`);
   return res?.data || [];
@@ -202,7 +203,7 @@ export async function listEvaluations({ year, month, status, keyword, branch } =
 // 「未提交审核人数」统计：返回 { total, submitted, unsubmitted, list }
 //   year / month 必传；branch 可选：
 //     - 有值 → 仅统计该支部
-//     - 空/缺失 → 统计全支部（支部书记视图）
+//     - 空/缺失 → 统计全支部（党总支书记视图）
 //   mock 模式下没有 user_table 数据，按「已提交数」倒推一个粗略占位数（仅本地调试用）
 export async function getUnsubmittedCount({ year, month, branch } = {}) {
   if (USE_MOCK) {
@@ -408,11 +409,11 @@ export async function saveMyMenuOrder(order = []) {
   return Array.isArray(v) ? v : order;
 }
 
-// 年度红线扣分列表（分管领导）
+// 年度红线扣分列表（支部书记）
 //   year    必填（一年一人一条）
 //   status  可选：pending / reviewed
 //   keyword 可选：按姓名模糊搜索
-//   数据范围由后端强制限定为本支部（分管领导自己的 branch）
+//   数据范围由后端强制限定为本支部（支部书记自己的 branch）
 export async function listDisciplines({ year, status, keyword } = {}) {
   if (USE_MOCK) return [];
   const params = { year: String(year) };
@@ -423,7 +424,7 @@ export async function listDisciplines({ year, status, keyword } = {}) {
   return res?.data || [];
 }
 
-// 分管领导提交某条年度红线扣分（问卷形式）
+// 支部书记提交某条年度红线扣分（问卷形式）
 //   scores       每题「有无 + 事由」答案 + 快照 + 扣分合计（写入 discipline.scores）
 //   reviewScore  扣分合计（负数）
 //   整体扣分原因不再采集 → 后端固定写空串
@@ -436,7 +437,7 @@ export async function submitDisciplineReview(id, { scores, reviewScore } = {}) {
   return { id, scores, reviewScore, reviewStatus: 'reviewed' };
 }
 
-// 年度专项加分审核列表（支部书记 / 分管领导）
+// 年度专项加分审核列表（党总支书记 / 支部书记）
 //   year 必传（年度口径，没有月份）；status 可选 pending / reviewed；keyword 按姓名模糊搜索
 //   后端不做惰性生成：当年没人申报就是空数组
 export async function listCredits({ year, status, keyword } = {}) {
@@ -447,6 +448,16 @@ export async function listCredits({ year, status, keyword } = {}) {
   const qs = new URLSearchParams(params).toString();
   const res = await apiRequest(`/api/credits?${qs}`);
   return res?.data || [];
+}
+
+// 年度专项加分「未申报人数」统计：返回 { total, submitted, unsubmitted, list }
+//   year 必传（年度口径，没有月份）
+//   范围由后端按身份强制：**支部书记 = 本支部**；**党总支书记 = 全部支部（两个支部合计）**
+//   只数 admin_type IN (1,3)（有申报入口的组织委员 + 普通党员），前端不传 branch
+export async function getCreditUnsubmittedCount({ year } = {}) {
+  if (USE_MOCK) return { total: 0, submitted: 0, unsubmitted: 0, list: [] };
+  const res = await apiRequest(`/api/credits/unsubmitted?year=${String(year)}`);
+  return res?.data || { total: 0, submitted: 0, unsubmitted: 0, list: [] };
 }
 
 // 本人某年度的专项加分申报记录（没有申报过 → null；后端不做惰性生成）
@@ -552,7 +563,7 @@ export async function getMyAnnualRank({ year } = {}) {
   return res?.data || null;
 }
 
-// 积分汇总（组织委员 / 支部书记 / 分管领导）：某个月的基础积分 / 履职贡献 / 总分
+// 积分汇总（组织委员 / 党总支书记 / 支部书记）：某个月的基础积分 / 履职贡献 / 总分
 //   branch  'all'（全体成员）| 'first' / 'second'（指定支部）| 不传（本人所在支部）
 //           组织委员只能看自己支部 —— 传了也由后端强制覆盖
 //   后端已按总分降序排好；无记录 / 未审核的模块按 0 分返回，但仍出现在列表里
@@ -571,7 +582,7 @@ export async function getBranchMonthlySummary({ year, month, branch } = {}) {
   return res?.data || { year, month, branch: '', rows: [] };
 }
 
-// 支部年度积分汇总（组织委员 / 支部书记 / 分管领导）
+// 支部年度积分汇总（组织委员 / 党总支书记 / 支部书记）
 //   year 必传；branch 不传 = 本人支部，'all' = 全体成员
 //   口径：基础积分 / 履职贡献 = 当年有记录月份的平均分；
 //         年度专项加分 = credit.reviewScore；年度红线扣分 = discipline.reviewScore

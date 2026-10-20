@@ -10,11 +10,7 @@ import {
 } from 'antd';
 import { UserAddOutlined } from '@ant-design/icons';
 import { useNavigate, Link } from 'react-router-dom';
-import {
-  POSITION_TYPES,
-  BRANCHES,
-  getPositionsByType,
-} from '../lib/constants';
+import { POSITION_TYPES, getPositionsByType } from '../lib/constants';
 import { useAuth } from '../context/AuthContext';
 
 const { Title, Text } = Typography;
@@ -110,7 +106,7 @@ export default function Register() {
           </Form.Item>
 
           <Form.Item
-            label="真实姓名"
+            label="姓名"
             name="name"
             rules={[{ required: true, message: '请输入姓名', min: 2 }]}
           >
@@ -128,21 +124,17 @@ export default function Register() {
             <Input maxLength={32} />
           </Form.Item>
 
-          <Form.Item
-            label="所在党支部"
-            name="branch"
-            rules={[{ required: true, message: '请选择所在党支部' }]}
-          >
-            <Select placeholder="请选择所在党支部" options={BRANCHES} />
-          </Form.Item>
+          {/* 支部不再由本人选择：注册时后端按「工作证编号 → 白名单」取出所在党支部落库
+              （白名单 = server/admin-whitelist.mjs，源《供服二中心党员信息表》），
+              避免党员自己选错。 */}
 
-          {/* 岗位类型 / 岗位：普通党员、组织委员必填；分管领导、支部书记可留空。
+          {/* 岗位类型 / 岗位：普通党员、组织委员必填；支部书记、党总支书记、分管领导可留空。
               身份由工号白名单决定，前端无法预知，故此处不强制；
               留空时由后端按身份校验并返回「请填写岗位类型和岗位」。 */}
           <Form.Item
             label="岗位类型"
             name="positionType"
-            extra="普通党员 / 组织委员 必填；分管领导 / 支部书记 可留空"
+            extra="普通党员 / 组织委员 必填；支部书记 / 党总支书记 / 分管领导 可留空"
           >
             <Select
               placeholder="请选择岗位类型"
